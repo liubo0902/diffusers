@@ -25,8 +25,8 @@ from .vae import DecoderOutput, DiagonalGaussianDistribution, Encoder, MaskCondi
 
 class AsymmetricAutoencoderKL(ModelMixin, ConfigMixin):
     r"""
-    Designing a Better Asymmetric VQGAN for StableDiffusion https://arxiv.org/abs/2306.04632 . A VAE model with KL loss
-    for encoding images into latents and decoding latent representations into images.
+    Designing a Better Asymmetric VQGAN for StableDiffusion https://huggingface.co/papers/2306.04632 . A VAE model with
+    KL loss for encoding images into latents and decoding latent representations into images.
 
     This model inherits from [`ModelMixin`]. Check the superclass documentation for it's generic methods implemented
     for all models (such as downloading or saving).
@@ -57,8 +57,10 @@ class AsymmetricAutoencoderKL(ModelMixin, ConfigMixin):
             model. The latents are scaled with the formula `z = z * scaling_factor` before being passed to the
             diffusion model. When decoding, the latents are scaled back to the original scale with the formula: `z = 1
             / scaling_factor * z`. For more details, refer to sections 4.3.2 and D.1 of the [High-Resolution Image
-            Synthesis with Latent Diffusion Models](https://arxiv.org/abs/2112.10752) paper.
+            Synthesis with Latent Diffusion Models](https://huggingface.co/papers/2112.10752) paper.
     """
+
+    _skip_layerwise_casting_patterns = ["decoder"]
 
     @register_to_config
     def __init__(
@@ -112,9 +114,7 @@ class AsymmetricAutoencoderKL(ModelMixin, ConfigMixin):
         self.register_to_config(force_upcast=False)
 
     @apply_forward_hook
-    def encode(
-        self, x: torch.FloatTensor, return_dict: bool = True
-    ) -> Union[AutoencoderKLOutput, Tuple[torch.FloatTensor]]:
+    def encode(self, x: torch.Tensor, return_dict: bool = True) -> Union[AutoencoderKLOutput, Tuple[torch.Tensor]]:
         h = self.encoder(x)
         moments = self.quant_conv(h)
         posterior = DiagonalGaussianDistribution(moments)
@@ -126,11 +126,11 @@ class AsymmetricAutoencoderKL(ModelMixin, ConfigMixin):
 
     def _decode(
         self,
-        z: torch.FloatTensor,
-        image: Optional[torch.FloatTensor] = None,
-        mask: Optional[torch.FloatTensor] = None,
+        z: torch.Tensor,
+        image: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
-    ) -> Union[DecoderOutput, Tuple[torch.FloatTensor]]:
+    ) -> Union[DecoderOutput, Tuple[torch.Tensor]]:
         z = self.post_quant_conv(z)
         dec = self.decoder(z, image, mask)
 
@@ -142,12 +142,12 @@ class AsymmetricAutoencoderKL(ModelMixin, ConfigMixin):
     @apply_forward_hook
     def decode(
         self,
-        z: torch.FloatTensor,
+        z: torch.Tensor,
         generator: Optional[torch.Generator] = None,
-        image: Optional[torch.FloatTensor] = None,
-        mask: Optional[torch.FloatTensor] = None,
+        image: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
-    ) -> Union[DecoderOutput, Tuple[torch.FloatTensor]]:
+    ) -> Union[DecoderOutput, Tuple[torch.Tensor]]:
         decoded = self._decode(z, image, mask).sample
 
         if not return_dict:
@@ -157,16 +157,16 @@ class AsymmetricAutoencoderKL(ModelMixin, ConfigMixin):
 
     def forward(
         self,
-        sample: torch.FloatTensor,
-        mask: Optional[torch.FloatTensor] = None,
+        sample: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
         sample_posterior: bool = False,
         return_dict: bool = True,
         generator: Optional[torch.Generator] = None,
-    ) -> Union[DecoderOutput, Tuple[torch.FloatTensor]]:
+    ) -> Union[DecoderOutput, Tuple[torch.Tensor]]:
         r"""
         Args:
-            sample (`torch.FloatTensor`): Input sample.
-            mask (`torch.FloatTensor`, *optional*, defaults to `None`): Optional inpainting mask.
+            sample (`torch.Tensor`): Input sample.
+            mask (`torch.Tensor`, *optional*, defaults to `None`): Optional inpainting mask.
             sample_posterior (`bool`, *optional*, defaults to `False`):
                 Whether to sample from the posterior.
             return_dict (`bool`, *optional*, defaults to `True`):
@@ -178,7 +178,7 @@ class AsymmetricAutoencoderKL(ModelMixin, ConfigMixin):
             z = posterior.sample(generator=generator)
         else:
             z = posterior.mode()
-        dec = self.decode(z, sample, mask).sample
+        dec = self.decode(z, generator, sample, mask).sample
 
         if not return_dict:
             return (dec,)

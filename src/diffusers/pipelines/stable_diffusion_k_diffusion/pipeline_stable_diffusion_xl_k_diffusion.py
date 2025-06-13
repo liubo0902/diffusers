@@ -36,8 +36,6 @@ from ...models import AutoencoderKL, UNet2DConditionModel
 from ...models.attention_processor import (
     AttnProcessor2_0,
     FusedAttnProcessor2_0,
-    LoRAAttnProcessor2_0,
-    LoRAXFormersAttnProcessor,
     XFormersAttnProcessor,
 )
 from ...models.lora import adjust_lora_scale_text_encoder
@@ -50,7 +48,7 @@ from ...utils import (
     unscale_lora_layers,
 )
 from ...utils.torch_utils import randn_tensor
-from ..pipeline_utils import DiffusionPipeline
+from ..pipeline_utils import DeprecatedPipelineMixin, DiffusionPipeline, StableDiffusionMixin
 from ..stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 
 
@@ -90,12 +88,16 @@ class ModelWrapper:
 
 
 class StableDiffusionXLKDiffusionPipeline(
+    DeprecatedPipelineMixin,
     DiffusionPipeline,
+    StableDiffusionMixin,
     FromSingleFileMixin,
     StableDiffusionXLLoraLoaderMixin,
     TextualInversionLoaderMixin,
     IPAdapterMixin,
 ):
+    _last_supported_version = "0.33.1"
+
     r"""
     Pipeline for text-to-image generation using Stable Diffusion XL and k-diffusion.
 
@@ -171,10 +173,14 @@ class StableDiffusionXLKDiffusionPipeline(
             scheduler=scheduler,
         )
         self.register_to_config(force_zeros_for_empty_prompt=force_zeros_for_empty_prompt)
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
 
-        self.default_sample_size = self.unet.config.sample_size
+        self.default_sample_size = (
+            self.unet.config.sample_size
+            if hasattr(self, "unet") and self.unet is not None and hasattr(self.unet.config, "sample_size")
+            else 128
+        )
 
         model = ModelWrapper(unet, scheduler.alphas_cumprod)
         if scheduler.config.prediction_type == "v_prediction":
@@ -196,39 +202,6 @@ class StableDiffusionXLKDiffusionPipeline(
 
             raise ValueError(f"Invalid scheduler type {scheduler_type}. Please choose one of {valid_samplers}.")
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_slicing
-    def enable_vae_slicing(self):
-        r"""
-        Enable sliced VAE decoding. When this option is enabled, the VAE will split the input tensor in slices to
-        compute decoding in several steps. This is useful to save some memory and allow larger batch sizes.
-        """
-        self.vae.enable_slicing()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_vae_slicing
-    def disable_vae_slicing(self):
-        r"""
-        Disable sliced VAE decoding. If `enable_vae_slicing` was previously enabled, this method will go back to
-        computing decoding in one step.
-        """
-        self.vae.disable_slicing()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_tiling
-    def enable_vae_tiling(self):
-        r"""
-        Enable tiled VAE decoding. When this option is enabled, the VAE will split the input tensor into tiles to
-        compute decoding and encoding in several steps. This is useful for saving a large amount of memory and to allow
-        processing larger images.
-        """
-        self.vae.enable_tiling()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_vae_tiling
-    def disable_vae_tiling(self):
-        r"""
-        Disable tiled VAE decoding. If `enable_vae_tiling` was previously enabled, this method will go back to
-        computing decoding in one step.
-        """
-        self.vae.disable_tiling()
-
     # Copied from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl.StableDiffusionXLPipeline.encode_prompt
     def encode_prompt(
         self,
@@ -239,10 +212,10 @@ class StableDiffusionXLKDiffusionPipeline(
         do_classifier_free_guidance: bool = True,
         negative_prompt: Optional[str] = None,
         negative_prompt_2: Optional[str] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         lora_scale: Optional[float] = None,
         clip_skip: Optional[int] = None,
     ):
@@ -268,17 +241,17 @@ class StableDiffusionXLKDiffusionPipeline(
             negative_prompt_2 (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation to be sent to `tokenizer_2` and
                 `text_encoder_2`. If not defined, `negative_prompt` is used in both text-encoders
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
-            pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
                 If not provided, pooled text embeddings will be generated from `prompt` input argument.
-            negative_pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, pooled negative_prompt_embeds will be generated from `negative_prompt`
                 input argument.
@@ -355,7 +328,9 @@ class StableDiffusionXLKDiffusionPipeline(
                 prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
 
                 # We are only ALWAYS interested in the pooled output of the final text encoder
-                pooled_prompt_embeds = prompt_embeds[0]
+                if pooled_prompt_embeds is None and prompt_embeds[0].ndim == 2:
+                    pooled_prompt_embeds = prompt_embeds[0]
+
                 if clip_skip is None:
                     prompt_embeds = prompt_embeds.hidden_states[-2]
                 else:
@@ -414,8 +389,10 @@ class StableDiffusionXLKDiffusionPipeline(
                     uncond_input.input_ids.to(device),
                     output_hidden_states=True,
                 )
+
                 # We are only ALWAYS interested in the pooled output of the final text encoder
-                negative_pooled_prompt_embeds = negative_prompt_embeds[0]
+                if negative_pooled_prompt_embeds is None and negative_prompt_embeds[0].ndim == 2:
+                    negative_pooled_prompt_embeds = negative_prompt_embeds[0]
                 negative_prompt_embeds = negative_prompt_embeds.hidden_states[-2]
 
                 negative_prompt_embeds_list.append(negative_prompt_embeds)
@@ -529,7 +506,12 @@ class StableDiffusionXLKDiffusionPipeline(
             )
 
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
-        shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
+        shape = (
+            batch_size,
+            num_channels_latents,
+            int(height) // self.vae_scale_factor,
+            int(width) // self.vae_scale_factor,
+        )
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
@@ -570,8 +552,6 @@ class StableDiffusionXLKDiffusionPipeline(
             (
                 AttnProcessor2_0,
                 XFormersAttnProcessor,
-                LoRAXFormersAttnProcessor,
-                LoRAAttnProcessor2_0,
                 FusedAttnProcessor2_0,
             ),
         )
@@ -582,94 +562,6 @@ class StableDiffusionXLKDiffusionPipeline(
             self.vae.decoder.conv_in.to(dtype)
             self.vae.decoder.mid_block.to(dtype)
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_freeu
-    def enable_freeu(self, s1: float, s2: float, b1: float, b2: float):
-        r"""Enables the FreeU mechanism as in https://arxiv.org/abs/2309.11497.
-
-        The suffixes after the scaling factors represent the stages where they are being applied.
-
-        Please refer to the [official repository](https://github.com/ChenyangSi/FreeU) for combinations of the values
-        that are known to work well for different pipelines such as Stable Diffusion v1, v2, and Stable Diffusion XL.
-
-        Args:
-            s1 (`float`):
-                Scaling factor for stage 1 to attenuate the contributions of the skip features. This is done to
-                mitigate "oversmoothing effect" in the enhanced denoising process.
-            s2 (`float`):
-                Scaling factor for stage 2 to attenuate the contributions of the skip features. This is done to
-                mitigate "oversmoothing effect" in the enhanced denoising process.
-            b1 (`float`): Scaling factor for stage 1 to amplify the contributions of backbone features.
-            b2 (`float`): Scaling factor for stage 2 to amplify the contributions of backbone features.
-        """
-        if not hasattr(self, "unet"):
-            raise ValueError("The pipeline must have `unet` for using FreeU.")
-        self.unet.enable_freeu(s1=s1, s2=s2, b1=b1, b2=b2)
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_freeu
-    def disable_freeu(self):
-        """Disables the FreeU mechanism if enabled."""
-        self.unet.disable_freeu()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.fuse_qkv_projections
-    def fuse_qkv_projections(self, unet: bool = True, vae: bool = True):
-        """
-        Enables fused QKV projections. For self-attention modules, all projection matrices (i.e., query,
-        key, value) are fused. For cross-attention modules, key and value projection matrices are fused.
-
-        <Tip warning={true}>
-
-        This API is 🧪 experimental.
-
-        </Tip>
-
-        Args:
-            unet (`bool`, defaults to `True`): To apply fusion on the UNet.
-            vae (`bool`, defaults to `True`): To apply fusion on the VAE.
-        """
-        self.fusing_unet = False
-        self.fusing_vae = False
-
-        if unet:
-            self.fusing_unet = True
-            self.unet.fuse_qkv_projections()
-            self.unet.set_attn_processor(FusedAttnProcessor2_0())
-
-        if vae:
-            if not isinstance(self.vae, AutoencoderKL):
-                raise ValueError("`fuse_qkv_projections()` is only supported for the VAE of type `AutoencoderKL`.")
-
-            self.fusing_vae = True
-            self.vae.fuse_qkv_projections()
-            self.vae.set_attn_processor(FusedAttnProcessor2_0())
-
-    def unfuse_qkv_projections(self, unet: bool = True, vae: bool = True):
-        """Disable QKV projection fusion if enabled.
-
-        <Tip warning={true}>
-
-        This API is 🧪 experimental.
-
-        </Tip>
-
-        Args:
-            unet (`bool`, defaults to `True`): To apply fusion on the UNet.
-            vae (`bool`, defaults to `True`): To apply fusion on the VAE.
-
-        """
-        if unet:
-            if not self.fusing_unet:
-                logger.warning("The UNet was not initially fused for QKV projections. Doing nothing.")
-            else:
-                self.unet.unfuse_qkv_projections()
-                self.fusing_unet = False
-
-        if vae:
-            if not self.fusing_vae:
-                logger.warning("The VAE was not initially fused for QKV projections. Doing nothing.")
-            else:
-                self.vae.unfuse_qkv_projections()
-                self.fusing_vae = False
-
     @property
     def guidance_scale(self):
         return self._guidance_scale
@@ -679,7 +571,7 @@ class StableDiffusionXLKDiffusionPipeline(
         return self._clip_skip
 
     # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-    # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+    # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
     # corresponds to doing no classifier free guidance.
     @property
     def do_classifier_free_guidance(self):
@@ -699,11 +591,11 @@ class StableDiffusionXLKDiffusionPipeline(
         negative_prompt_2: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         original_size: Optional[Tuple[int, int]] = None,
@@ -740,11 +632,11 @@ class StableDiffusionXLKDiffusionPipeline(
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
             guidance_scale (`float`, *optional*, defaults to 5.0):
-                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
-                `guidance_scale` is defined as `w` of equation 2. of [Imagen
-                Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
-                1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
-                usually at the expense of lower image quality.
+                Guidance scale as defined in [Classifier-Free Diffusion
+                Guidance](https://huggingface.co/papers/2207.12598). `guidance_scale` is defined as `w` of equation 2.
+                of [Imagen Paper](https://huggingface.co/papers/2205.11487). Guidance scale is enabled by setting
+                `guidance_scale > 1`. Higher guidance scale encourages to generate images that are closely linked to
+                the text `prompt`, usually at the expense of lower image quality.
             negative_prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation. If not defined, one has to pass
                 `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
@@ -757,21 +649,21 @@ class StableDiffusionXLKDiffusionPipeline(
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
+            latents (`torch.Tensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
                 tensor will ge generated by sampling using the supplied random `generator`.
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
-            pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
                 If not provided, pooled text embeddings will be generated from `prompt` input argument.
-            negative_pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, pooled negative_prompt_embeds will be generated from `negative_prompt`
                 input argument.

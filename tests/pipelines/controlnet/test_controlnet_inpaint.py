@@ -36,11 +36,12 @@ from diffusers.pipelines.controlnet.pipeline_controlnet import MultiControlNetMo
 from diffusers.utils import load_image
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
     enable_full_determinism,
     floats_tensor,
     load_numpy,
     numpy_cosine_similarity_distance,
-    require_torch_gpu,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
@@ -51,11 +52,7 @@ from ..pipeline_params import (
     TEXT_GUIDED_IMAGE_INPAINTING_PARAMS,
     TEXT_TO_IMAGE_IMAGE_PARAMS,
 )
-from ..test_pipelines_common import (
-    PipelineKarrasSchedulerTesterMixin,
-    PipelineLatentTesterMixin,
-    PipelineTesterMixin,
-)
+from ..test_pipelines_common import PipelineKarrasSchedulerTesterMixin, PipelineLatentTesterMixin, PipelineTesterMixin
 
 
 enable_full_determinism()
@@ -159,7 +156,7 @@ class ControlNetInpaintPipelineFastTests(
             "generator": generator,
             "num_inference_steps": 2,
             "guidance_scale": 6.0,
-            "output_type": "numpy",
+            "output_type": "np",
             "image": image,
             "mask_image": mask_image,
             "control_image": control_image,
@@ -179,6 +176,13 @@ class ControlNetInpaintPipelineFastTests(
 
     def test_inference_batch_single_identical(self):
         self._test_inference_batch_single_identical(expected_max_diff=2e-3)
+
+    def test_encode_prompt_works_in_isolation(self):
+        extra_required_param_value_dict = {
+            "device": torch.device(torch_device).type,
+            "do_classifier_free_guidance": self.get_dummy_inputs(device=torch_device).get("guidance_scale", 1.0) > 1.0,
+        }
+        return super().test_encode_prompt_works_in_isolation(extra_required_param_value_dict)
 
 
 class ControlNetSimpleInpaintPipelineFastTests(ControlNetInpaintPipelineFastTests):
@@ -261,6 +265,8 @@ class MultiControlNetInpaintPipelineFastTests(
     params = TEXT_GUIDED_IMAGE_INPAINTING_PARAMS
     batch_params = TEXT_GUIDED_IMAGE_INPAINTING_BATCH_PARAMS
 
+    supports_dduf = False
+
     def get_dummy_components(self):
         torch.manual_seed(0)
         unet = UNet2DConditionModel(
@@ -277,7 +283,7 @@ class MultiControlNetInpaintPipelineFastTests(
 
         def init_weights(m):
             if isinstance(m, torch.nn.Conv2d):
-                torch.nn.init.normal(m.weight)
+                torch.nn.init.normal_(m.weight)
                 m.bias.data.fill_(1.0)
 
         controlnet1 = ControlNetModel(
@@ -379,7 +385,7 @@ class MultiControlNetInpaintPipelineFastTests(
             "generator": generator,
             "num_inference_steps": 2,
             "guidance_scale": 6.0,
-            "output_type": "numpy",
+            "output_type": "np",
             "image": image,
             "mask_image": mask_image,
             "control_image": control_image,
@@ -445,22 +451,34 @@ class MultiControlNetInpaintPipelineFastTests(
             except NotImplementedError:
                 pass
 
+    def test_encode_prompt_works_in_isolation(self):
+        extra_required_param_value_dict = {
+            "device": torch.device(torch_device).type,
+            "do_classifier_free_guidance": self.get_dummy_inputs(device=torch_device).get("guidance_scale", 1.0) > 1.0,
+        }
+        return super().test_encode_prompt_works_in_isolation(extra_required_param_value_dict)
+
 
 @slow
-@require_torch_gpu
+@require_torch_accelerator
 class ControlNetInpaintPipelineSlowTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def test_canny(self):
         controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-canny")
 
         pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-            "runwayml/stable-diffusion-inpainting", safety_checker=None, controlnet=controlnet
+            "botp/stable-diffusion-v1-5-inpainting", safety_checker=None, controlnet=controlnet
         )
-        pipe.enable_model_cpu_offload()
+        pipe.enable_model_cpu_offload(device=torch_device)
         pipe.set_progress_bar_config(disable=None)
 
         generator = torch.Generator(device="cpu").manual_seed(0)
@@ -503,10 +521,10 @@ class ControlNetInpaintPipelineSlowTests(unittest.TestCase):
         controlnet = ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_inpaint")
 
         pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5", safety_checker=None, controlnet=controlnet
+            "stable-diffusion-v1-5/stable-diffusion-v1-5", safety_checker=None, controlnet=controlnet
         )
         pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-        pipe.enable_model_cpu_offload()
+        pipe.enable_model_cpu_offload(device=torch_device)
         pipe.set_progress_bar_config(disable=None)
 
         generator = torch.Generator(device="cpu").manual_seed(33)
@@ -555,56 +573,3 @@ class ControlNetInpaintPipelineSlowTests(unittest.TestCase):
         )
 
         assert numpy_cosine_similarity_distance(expected_image.flatten(), image.flatten()) < 1e-2
-
-    def test_load_local(self):
-        controlnet = ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_canny")
-        pipe_1 = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5", safety_checker=None, controlnet=controlnet
-        )
-
-        controlnet = ControlNetModel.from_single_file(
-            "https://huggingface.co/lllyasviel/ControlNet-v1-1/blob/main/control_v11p_sd15_canny.pth"
-        )
-        pipe_2 = StableDiffusionControlNetInpaintPipeline.from_single_file(
-            "https://huggingface.co/runwayml/stable-diffusion-v1-5/blob/main/v1-5-pruned-emaonly.safetensors",
-            safety_checker=None,
-            controlnet=controlnet,
-            scheduler_type="pndm",
-        )
-        control_image = load_image(
-            "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/sd_controlnet/bird_canny.png"
-        ).resize((512, 512))
-        image = load_image(
-            "https://huggingface.co/lllyasviel/sd-controlnet-canny/resolve/main/images/bird.png"
-        ).resize((512, 512))
-        mask_image = load_image(
-            "https://huggingface.co/datasets/diffusers/test-arrays/resolve/main"
-            "/stable_diffusion_inpaint/input_bench_mask.png"
-        ).resize((512, 512))
-
-        pipes = [pipe_1, pipe_2]
-        images = []
-        for pipe in pipes:
-            pipe.enable_model_cpu_offload()
-            pipe.set_progress_bar_config(disable=None)
-
-            generator = torch.Generator(device="cpu").manual_seed(0)
-            prompt = "bird"
-            output = pipe(
-                prompt,
-                image=image,
-                control_image=control_image,
-                mask_image=mask_image,
-                strength=0.9,
-                generator=generator,
-                output_type="np",
-                num_inference_steps=3,
-            )
-            images.append(output.images[0])
-
-            del pipe
-            gc.collect()
-            torch.cuda.empty_cache()
-
-        max_diff = numpy_cosine_similarity_distance(images[0].flatten(), images[1].flatten())
-        assert max_diff < 1e-3

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -52,7 +52,7 @@ if is_wandb_available():
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.27.0.dev0")
+check_min_version("0.34.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -81,6 +81,7 @@ tags:
 - kandinsky
 - text-to-image
 - diffusers
+- diffusers-training
 inference: true
 ---
     """
@@ -176,7 +177,7 @@ def log_validation(vae, image_encoder, image_processor, unet, args, accelerator,
                 }
             )
         else:
-            logger.warn(f"image logging not implemented for {tracker.name}")
+            logger.warning(f"image logging not implemented for {tracker.name}")
 
     del pipeline
     torch.cuda.empty_cache()
@@ -311,7 +312,7 @@ def parse_args():
         type=float,
         default=None,
         help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
-        "More details here: https://arxiv.org/abs/2303.09556.",
+        "More details here: https://huggingface.co/papers/2303.09556.",
     )
     parser.add_argument(
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
@@ -457,6 +458,10 @@ def main():
         project_config=accelerator_project_config,
     )
 
+    # Disable AMP for MPS.
+    if torch.backends.mps.is_available():
+        accelerator.native_amp = False
+
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -533,7 +538,7 @@ def main():
 
             xformers_version = version.parse(xformers.__version__)
             if xformers_version == version.parse("0.0.16"):
-                logger.warn(
+                logger.warning(
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
@@ -784,7 +789,7 @@ def main():
                 if args.snr_gamma is None:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 else:
-                    # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
+                    # Compute loss-weights as per Section 3.4 of https://huggingface.co/papers/2303.09556.
                     # Since we predict the noise instead of x_0, the original formulation is slightly changed.
                     # This is discussed in Section 4.2 of the same paper.
                     snr = compute_snr(noise_scheduler, timesteps)
@@ -891,7 +896,6 @@ def main():
         images = []
         if args.validation_prompts is not None:
             logger.info("Running inference for collecting generated images...")
-            pipeline = pipeline.to(accelerator.device)
             pipeline.torch_dtype = weight_dtype
             pipeline.set_progress_bar_config(disable=True)
             pipeline.enable_model_cpu_offload()

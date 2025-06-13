@@ -2,7 +2,7 @@
 # A SDXL pipeline can take unlimited weighted prompt
 #
 # Author: Andrew Zhu
-# Github: https://github.com/xhinker
+# GitHub: https://github.com/xhinker
 # Medium: https://medium.com/@xhinker
 ## -----------------------------------------------------------
 
@@ -22,24 +22,28 @@ from transformers import (
 
 from diffusers import DiffusionPipeline, StableDiffusionXLPipeline
 from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
-from diffusers.loaders import FromSingleFileMixin, IPAdapterMixin, LoraLoaderMixin, TextualInversionLoaderMixin
-from diffusers.models import AutoencoderKL, ImageProjection, UNet2DConditionModel
-from diffusers.models.attention_processor import (
-    AttnProcessor2_0,
-    FusedAttnProcessor2_0,
-    LoRAAttnProcessor2_0,
-    LoRAXFormersAttnProcessor,
-    XFormersAttnProcessor,
+from diffusers.loaders import (
+    FromSingleFileMixin,
+    IPAdapterMixin,
+    StableDiffusionXLLoraLoaderMixin,
+    TextualInversionLoaderMixin,
 )
+from diffusers.models import AutoencoderKL, ImageProjection, UNet2DConditionModel
+from diffusers.models.attention_processor import AttnProcessor2_0, XFormersAttnProcessor
+from diffusers.models.lora import adjust_lora_scale_text_encoder
+from diffusers.pipelines.pipeline_utils import StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.utils import (
+    USE_PEFT_BACKEND,
     deprecate,
     is_accelerate_available,
     is_accelerate_version,
     is_invisible_watermark_available,
     logging,
     replace_example_docstring,
+    scale_lora_layers,
+    unscale_lora_layers,
 )
 from diffusers.utils.torch_utils import randn_tensor
 
@@ -164,7 +168,7 @@ def get_prompts_tokens_with_weights(clip_tokenizer: CLIPTokenizer, prompt: str):
         text_tokens (list)
             A list contains token ids
         text_weight (list)
-            A list contains the correspodent weight of token ids
+            A list contains the correspondent weight of token ids
 
     Example:
         import torch
@@ -261,6 +265,7 @@ def get_weighted_text_embeddings_sdxl(
     num_images_per_prompt: int = 1,
     device: Optional[torch.device] = None,
     clip_skip: Optional[int] = None,
+    lora_scale: Optional[int] = None,
 ):
     """
     This function can process long prompt with weights, no length limitation
@@ -280,6 +285,24 @@ def get_weighted_text_embeddings_sdxl(
         neg_prompt_embeds (torch.Tensor)
     """
     device = device or pipe._execution_device
+
+    # set lora scale so that monkey patched LoRA
+    # function of text encoder can correctly access it
+    if lora_scale is not None and isinstance(pipe, StableDiffusionXLLoraLoaderMixin):
+        pipe._lora_scale = lora_scale
+
+        # dynamically adjust the LoRA scale
+        if pipe.text_encoder is not None:
+            if not USE_PEFT_BACKEND:
+                adjust_lora_scale_text_encoder(pipe.text_encoder, lora_scale)
+            else:
+                scale_lora_layers(pipe.text_encoder, lora_scale)
+
+        if pipe.text_encoder_2 is not None:
+            if not USE_PEFT_BACKEND:
+                adjust_lora_scale_text_encoder(pipe.text_encoder_2, lora_scale)
+            else:
+                scale_lora_layers(pipe.text_encoder_2, lora_scale)
 
     if prompt_2:
         prompt = f"{prompt} {prompt_2}"
@@ -429,6 +452,16 @@ def get_weighted_text_embeddings_sdxl(
         bs_embed * num_images_per_prompt, -1
     )
 
+    if pipe.text_encoder is not None:
+        if isinstance(pipe, StableDiffusionXLLoraLoaderMixin) and USE_PEFT_BACKEND:
+            # Retrieve the original scale by scaling back the LoRA layers
+            unscale_lora_layers(pipe.text_encoder, lora_scale)
+
+    if pipe.text_encoder_2 is not None:
+        if isinstance(pipe, StableDiffusionXLLoraLoaderMixin) and USE_PEFT_BACKEND:
+            # Retrieve the original scale by scaling back the LoRA layers
+            unscale_lora_layers(pipe.text_encoder_2, lora_scale)
+
     return prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
 
 
@@ -474,7 +507,7 @@ EXAMPLE_DOC_STRING = """
 def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     """
     Rescale `noise_cfg` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
-    Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf). See Section 3.4
+    Sample Steps are Flawed](https://huggingface.co/papers/2305.08891). See Section 3.4
     """
     std_text = noise_pred_text.std(dim=list(range(1, noise_pred_text.ndim)), keepdim=True)
     std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
@@ -545,7 +578,12 @@ def retrieve_timesteps(
 
 
 class SDXLLongPromptWeightingPipeline(
-    DiffusionPipeline, FromSingleFileMixin, IPAdapterMixin, LoraLoaderMixin, TextualInversionLoaderMixin
+    DiffusionPipeline,
+    StableDiffusionMixin,
+    FromSingleFileMixin,
+    IPAdapterMixin,
+    StableDiffusionXLLoraLoaderMixin,
+    TextualInversionLoaderMixin,
 ):
     r"""
     Pipeline for text-to-image generation using Stable Diffusion XL.
@@ -556,8 +594,8 @@ class SDXLLongPromptWeightingPipeline(
     The pipeline also inherits the following loading methods:
         - [`~loaders.FromSingleFileMixin.from_single_file`] for loading `.ckpt` files
         - [`~loaders.IPAdapterMixin.load_ip_adapter`] for loading IP Adapters
-        - [`~loaders.LoraLoaderMixin.load_lora_weights`] for loading LoRA weights
-        - [`~loaders.LoraLoaderMixin.save_lora_weights`] for saving LoRA weights
+        - [`~loaders.StableDiffusionXLLoraLoaderMixin.load_lora_weights`] for loading LoRA weights
+        - [`~loaders.StableDiffusionXLLoraLoaderMixin.save_lora_weights`] for saving LoRA weights
         - [`~loaders.TextualInversionLoaderMixin.load_textual_inversion`] for loading textual inversion embeddings
 
     Args:
@@ -635,12 +673,16 @@ class SDXLLongPromptWeightingPipeline(
             image_encoder=image_encoder,
         )
         self.register_to_config(force_zeros_for_empty_prompt=force_zeros_for_empty_prompt)
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.mask_processor = VaeImageProcessor(
             vae_scale_factor=self.vae_scale_factor, do_normalize=False, do_binarize=True, do_convert_grayscale=True
         )
-        self.default_sample_size = self.unet.config.sample_size
+        self.default_sample_size = (
+            self.unet.config.sample_size
+            if hasattr(self, "unet") and self.unet is not None and hasattr(self.unet.config, "sample_size")
+            else 128
+        )
 
         add_watermarker = add_watermarker if add_watermarker is not None else is_invisible_watermark_available()
 
@@ -648,39 +690,6 @@ class SDXLLongPromptWeightingPipeline(
             self.watermark = StableDiffusionXLWatermarker()
         else:
             self.watermark = None
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_slicing
-    def enable_vae_slicing(self):
-        r"""
-        Enable sliced VAE decoding. When this option is enabled, the VAE will split the input tensor in slices to
-        compute decoding in several steps. This is useful to save some memory and allow larger batch sizes.
-        """
-        self.vae.enable_slicing()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_vae_slicing
-    def disable_vae_slicing(self):
-        r"""
-        Disable sliced VAE decoding. If `enable_vae_slicing` was previously enabled, this method will go back to
-        computing decoding in one step.
-        """
-        self.vae.disable_slicing()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_tiling
-    def enable_vae_tiling(self):
-        r"""
-        Enable tiled VAE decoding. When this option is enabled, the VAE will split the input tensor into tiles to
-        compute decoding and encoding in several steps. This is useful for saving a large amount of memory and to allow
-        processing larger images.
-        """
-        self.vae.enable_tiling()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_vae_tiling
-    def disable_vae_tiling(self):
-        r"""
-        Disable tiled VAE decoding. If `enable_vae_tiling` was previously enabled, this method will go back to
-        computing decoding in one step.
-        """
-        self.vae.disable_tiling()
 
     def enable_model_cpu_offload(self, gpu_id=0):
         r"""
@@ -722,10 +731,10 @@ class SDXLLongPromptWeightingPipeline(
         do_classifier_free_guidance: bool = True,
         negative_prompt: Optional[str] = None,
         negative_prompt_2: Optional[str] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         lora_scale: Optional[float] = None,
     ):
         r"""
@@ -750,17 +759,17 @@ class SDXLLongPromptWeightingPipeline(
             negative_prompt_2 (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation to be sent to `tokenizer_2` and
                 `text_encoder_2`. If not defined, `negative_prompt` is used in both text-encoders
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
-            pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
                 If not provided, pooled text embeddings will be generated from `prompt` input argument.
-            negative_pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, pooled negative_prompt_embeds will be generated from `negative_prompt`
                 input argument.
@@ -771,7 +780,7 @@ class SDXLLongPromptWeightingPipeline(
 
         # set lora scale so that monkey patched LoRA
         # function of text encoder can correctly access it
-        if lora_scale is not None and isinstance(self, LoraLoaderMixin):
+        if lora_scale is not None and isinstance(self, StableDiffusionXLLoraLoaderMixin):
             self._lora_scale = lora_scale
 
         if prompt is not None and isinstance(prompt, str):
@@ -822,7 +831,9 @@ class SDXLLongPromptWeightingPipeline(
                 )
 
                 # We are only ALWAYS interested in the pooled output of the final text encoder
-                pooled_prompt_embeds = prompt_embeds[0]
+                if pooled_prompt_embeds is None and prompt_embeds[0].ndim == 2:
+                    pooled_prompt_embeds = prompt_embeds[0]
+
                 prompt_embeds = prompt_embeds.hidden_states[-2]
 
                 prompt_embeds_list.append(prompt_embeds)
@@ -874,7 +885,8 @@ class SDXLLongPromptWeightingPipeline(
                     output_hidden_states=True,
                 )
                 # We are only ALWAYS interested in the pooled output of the final text encoder
-                negative_pooled_prompt_embeds = negative_prompt_embeds[0]
+                if negative_pooled_prompt_embeds is None and negative_prompt_embeds[0].ndim == 2:
+                    negative_pooled_prompt_embeds = negative_prompt_embeds[0]
                 negative_prompt_embeds = negative_prompt_embeds.hidden_states[-2]
 
                 negative_prompt_embeds_list.append(negative_prompt_embeds)
@@ -933,7 +945,7 @@ class SDXLLongPromptWeightingPipeline(
     def prepare_extra_step_kwargs(self, generator, eta):
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
+        # eta corresponds to η in DDIM paper: https://huggingface.co/papers/2010.02502
         # and should be between [0, 1]
 
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
@@ -1030,95 +1042,6 @@ class SDXLLongPromptWeightingPipeline(
                 "If `negative_prompt_embeds` are provided, `negative_pooled_prompt_embeds` also have to be passed. Make sure to generate `negative_pooled_prompt_embeds` from the same text encoder that was used to generate `negative_prompt_embeds`."
             )
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_freeu
-    def enable_freeu(self, s1: float, s2: float, b1: float, b2: float):
-        r"""Enables the FreeU mechanism as in https://arxiv.org/abs/2309.11497.
-
-        The suffixes after the scaling factors represent the stages where they are being applied.
-
-        Please refer to the [official repository](https://github.com/ChenyangSi/FreeU) for combinations of the values
-        that are known to work well for different pipelines such as Stable Diffusion v1, v2, and Stable Diffusion XL.
-
-        Args:
-            s1 (`float`):
-                Scaling factor for stage 1 to attenuate the contributions of the skip features. This is done to
-                mitigate "oversmoothing effect" in the enhanced denoising process.
-            s2 (`float`):
-                Scaling factor for stage 2 to attenuate the contributions of the skip features. This is done to
-                mitigate "oversmoothing effect" in the enhanced denoising process.
-            b1 (`float`): Scaling factor for stage 1 to amplify the contributions of backbone features.
-            b2 (`float`): Scaling factor for stage 2 to amplify the contributions of backbone features.
-        """
-        if not hasattr(self, "unet"):
-            raise ValueError("The pipeline must have `unet` for using FreeU.")
-        self.unet.enable_freeu(s1=s1, s2=s2, b1=b1, b2=b2)
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_freeu
-    def disable_freeu(self):
-        """Disables the FreeU mechanism if enabled."""
-        self.unet.disable_freeu()
-
-    # Copied from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl.StableDiffusionXLPipeline.fuse_qkv_projections
-    def fuse_qkv_projections(self, unet: bool = True, vae: bool = True):
-        """
-        Enables fused QKV projections. For self-attention modules, all projection matrices (i.e., query,
-        key, value) are fused. For cross-attention modules, key and value projection matrices are fused.
-
-        <Tip warning={true}>
-
-        This API is 🧪 experimental.
-
-        </Tip>
-
-        Args:
-            unet (`bool`, defaults to `True`): To apply fusion on the UNet.
-            vae (`bool`, defaults to `True`): To apply fusion on the VAE.
-        """
-        self.fusing_unet = False
-        self.fusing_vae = False
-
-        if unet:
-            self.fusing_unet = True
-            self.unet.fuse_qkv_projections()
-            self.unet.set_attn_processor(FusedAttnProcessor2_0())
-
-        if vae:
-            if not isinstance(self.vae, AutoencoderKL):
-                raise ValueError("`fuse_qkv_projections()` is only supported for the VAE of type `AutoencoderKL`.")
-
-            self.fusing_vae = True
-            self.vae.fuse_qkv_projections()
-            self.vae.set_attn_processor(FusedAttnProcessor2_0())
-
-    # Copied from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl.StableDiffusionXLPipeline.unfuse_qkv_projections
-    def unfuse_qkv_projections(self, unet: bool = True, vae: bool = True):
-        """Disable QKV projection fusion if enabled.
-
-        <Tip warning={true}>
-
-        This API is 🧪 experimental.
-
-        </Tip>
-
-        Args:
-            unet (`bool`, defaults to `True`): To apply fusion on the UNet.
-            vae (`bool`, defaults to `True`): To apply fusion on the VAE.
-
-        """
-        if unet:
-            if not self.fusing_unet:
-                logger.warning("The UNet was not initially fused for QKV projections. Doing nothing.")
-            else:
-                self.unet.unfuse_qkv_projections()
-                self.fusing_unet = False
-
-        if vae:
-            if not self.fusing_vae:
-                logger.warning("The VAE was not initially fused for QKV projections. Doing nothing.")
-            else:
-                self.vae.unfuse_qkv_projections()
-                self.fusing_vae = False
-
     def get_timesteps(self, num_inference_steps, strength, device, denoising_start=None):
         # get the original timestep using init_timestep
         if denoising_start is None:
@@ -1145,7 +1068,7 @@ class SDXLLongPromptWeightingPipeline(
                 # because `num_inference_steps` might be even given that every timestep
                 # (except the highest one) is duplicated. If `num_inference_steps` is even it would
                 # mean that we cut the timesteps in the middle of the denoising step
-                # (between 1st and 2nd devirative) which leads to incorrect results. By adding 1
+                # (between 1st and 2nd derivative) which leads to incorrect results. By adding 1
                 # we ensure that the denoising process always ends after the 2nd derivate step of the scheduler
                 num_inference_steps = num_inference_steps + 1
 
@@ -1177,7 +1100,12 @@ class SDXLLongPromptWeightingPipeline(
         batch_size *= num_images_per_prompt
 
         if image is None:
-            shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
+            shape = (
+                batch_size,
+                num_channels_latents,
+                int(height) // self.vae_scale_factor,
+                int(width) // self.vae_scale_factor,
+            )
             if isinstance(generator, list) and len(generator) != batch_size:
                 raise ValueError(
                     f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
@@ -1257,7 +1185,12 @@ class SDXLLongPromptWeightingPipeline(
             return latents
 
         else:
-            shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
+            shape = (
+                batch_size,
+                num_channels_latents,
+                int(height) // self.vae_scale_factor,
+                int(width) // self.vae_scale_factor,
+            )
             if isinstance(generator, list) and len(generator) != batch_size:
                 raise ValueError(
                     f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
@@ -1399,12 +1332,7 @@ class SDXLLongPromptWeightingPipeline(
         self.vae.to(dtype=torch.float32)
         use_torch_2_0_or_xformers = isinstance(
             self.vae.decoder.mid_block.attentions[0].processor,
-            (
-                AttnProcessor2_0,
-                XFormersAttnProcessor,
-                LoRAXFormersAttnProcessor,
-                LoRAAttnProcessor2_0,
-            ),
+            (AttnProcessor2_0, XFormersAttnProcessor),
         )
         # if xformers or torch_2_0 is used attention block does not need
         # to be in float32 which can save lots of memory
@@ -1427,7 +1355,7 @@ class SDXLLongPromptWeightingPipeline(
                 data type of the generated embeddings
 
         Returns:
-            `torch.FloatTensor`: Embedding vectors with shape `(len(timesteps), embedding_dim)`
+            `torch.Tensor`: Embedding vectors with shape `(len(timesteps), embedding_dim)`
         """
         assert len(w.shape) == 1
         w = w * 1000.0
@@ -1455,7 +1383,7 @@ class SDXLLongPromptWeightingPipeline(
         return self._clip_skip
 
     # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-    # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+    # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
     # corresponds to doing no classifier free guidance.
     @property
     def do_classifier_free_guidance(self):
@@ -1485,7 +1413,7 @@ class SDXLLongPromptWeightingPipeline(
         prompt_2: Optional[str] = None,
         image: Optional[PipelineImageInput] = None,
         mask_image: Optional[PipelineImageInput] = None,
-        masked_image_latents: Optional[torch.FloatTensor] = None,
+        masked_image_latents: Optional[torch.Tensor] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         strength: float = 0.8,
@@ -1499,12 +1427,12 @@ class SDXLLongPromptWeightingPipeline(
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         ip_adapter_image: Optional[PipelineImageInput] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -1568,9 +1496,9 @@ class SDXLLongPromptWeightingPipeline(
                 forms a part of a "Mixture of Denoisers" multi-pipeline setup, as elaborated in [**Refine Image
                 Quality**](https://huggingface.co/docs/diffusers/using-diffusers/sdxl#refine-image-quality).
             guidance_scale (`float`, *optional*, defaults to 5.0):
-                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
+                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://huggingface.co/papers/2207.12598).
                 `guidance_scale` is defined as `w` of equation 2. of [Imagen
-                Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
+                Paper](https://huggingface.co/papers/2205.11487). Guidance scale is enabled by setting `guidance_scale >
                 1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
                 usually at the expense of lower image quality.
             negative_prompt (`str`):
@@ -1583,28 +1511,28 @@ class SDXLLongPromptWeightingPipeline(
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
             eta (`float`, *optional*, defaults to 0.0):
-                Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
+                Corresponds to parameter eta (η) in the DDIM paper: https://huggingface.co/papers/2010.02502. Only applies to
                 [`schedulers.DDIMScheduler`], will be ignored for others.
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
+            latents (`torch.Tensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
                 tensor will ge generated by sampling using the supplied random `generator`.
             ip_adapter_image: (`PipelineImageInput`, *optional*):
                 Optional image input to work with IP Adapters.
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
-            pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
                 If not provided, pooled text embeddings will be generated from `prompt` input argument.
-            negative_pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, pooled negative_prompt_embeds will be generated from `negative_prompt`
                 input argument.
@@ -1620,8 +1548,8 @@ class SDXLLongPromptWeightingPipeline(
                 [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
             guidance_rescale (`float`, *optional*, defaults to 0.0):
                 Guidance rescale factor proposed by [Common Diffusion Noise Schedules and Sample Steps are
-                Flawed](https://arxiv.org/pdf/2305.08891.pdf) `guidance_scale` is defined as `φ` in equation 16. of
-                [Common Diffusion Noise Schedules and Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf).
+                Flawed](https://huggingface.co/papers/2305.08891) `guidance_scale` is defined as `φ` in equation 16. of
+                [Common Diffusion Noise Schedules and Sample Steps are Flawed](https://huggingface.co/papers/2305.08891).
                 Guidance rescale factor should fix overexposure when using zero terminal SNR.
             original_size (`Tuple[int]`, *optional*, defaults to (1024, 1024)):
                 If `original_size` is not the same as `target_size` the image will appear to be down- or upsampled.
@@ -1648,7 +1576,7 @@ class SDXLLongPromptWeightingPipeline(
             callback_on_step_end_tensor_inputs (`List`, *optional*):
                 The list of tensor inputs for the `callback_on_step_end` function. The tensors specified in the list
                 will be passed as `callback_kwargs` argument. You will only be able to include variables listed in the
-                `._callback_tensor_inputs` attribute of your pipeine class.
+                `._callback_tensor_inputs` attribute of your pipeline class.
 
         Examples:
 
@@ -1724,7 +1652,9 @@ class SDXLLongPromptWeightingPipeline(
                 image_embeds = torch.cat([negative_image_embeds, image_embeds])
 
         # 3. Encode input prompt
-        (self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None)
+        lora_scale = (
+            self._cross_attention_kwargs.get("scale", None) if self._cross_attention_kwargs is not None else None
+        )
 
         negative_prompt = negative_prompt if negative_prompt is not None else ""
 
@@ -1739,6 +1669,7 @@ class SDXLLongPromptWeightingPipeline(
             neg_prompt=negative_prompt,
             num_images_per_prompt=num_images_per_prompt,
             clip_skip=clip_skip,
+            lora_scale=lora_scale,
         )
         dtype = prompt_embeds.dtype
 
@@ -1766,7 +1697,7 @@ class SDXLLongPromptWeightingPipeline(
 
         # 4. Prepare timesteps
         def denoising_value_valid(dnv):
-            return isinstance(self.denoising_end, float) and 0 < dnv < 1
+            return isinstance(dnv, float) and 0 < dnv < 1
 
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
         if image is not None:
@@ -1774,7 +1705,7 @@ class SDXLLongPromptWeightingPipeline(
                 num_inference_steps,
                 strength,
                 device,
-                denoising_start=self.denoising_start if denoising_value_valid else None,
+                denoising_start=self.denoising_start if denoising_value_valid(self.denoising_start) else None,
             )
 
             # check that number of inference steps is not < 1 - as this doesn't make sense
@@ -1842,7 +1773,7 @@ class SDXLLongPromptWeightingPipeline(
                         f"Incorrect configuration settings! The config of `pipeline.unet`: {self.unet.config} expects"
                         f" {self.unet.config.in_channels} but received `num_channels_latents`: {num_channels_latents} +"
                         f" `num_channels_mask`: {num_channels_mask} + `num_channels_masked_image`: {num_channels_masked_image}"
-                        f" = {num_channels_latents+num_channels_masked_image+num_channels_mask}. Please verify the config of"
+                        f" = {num_channels_latents + num_channels_masked_image + num_channels_mask}. Please verify the config of"
                         " `pipeline.unet` or your `mask_image` or `image` input."
                     )
             elif num_channels_unet != 4:
@@ -1941,7 +1872,7 @@ class SDXLLongPromptWeightingPipeline(
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 if self.do_classifier_free_guidance and guidance_rescale > 0.0:
-                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                    # Based on 3.4. in https://huggingface.co/papers/2305.08891
                     noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
 
                 # compute the previous noisy sample x_t -> x_t-1
@@ -1993,7 +1924,22 @@ class SDXLLongPromptWeightingPipeline(
                 self.upcast_vae()
                 latents = latents.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
 
-            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            # unscale/denormalize the latents
+            # denormalize with the mean and std if available and not None
+            has_latents_mean = hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None
+            has_latents_std = hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None
+            if has_latents_mean and has_latents_std:
+                latents_mean = (
+                    torch.tensor(self.vae.config.latents_mean).view(1, 4, 1, 1).to(latents.device, latents.dtype)
+                )
+                latents_std = (
+                    torch.tensor(self.vae.config.latents_std).view(1, 4, 1, 1).to(latents.device, latents.dtype)
+                )
+                latents = latents * latents_std / self.vae.config.scaling_factor + latents_mean
+            else:
+                latents = latents / self.vae.config.scaling_factor
+
+            image = self.vae.decode(latents, return_dict=False)[0]
 
             # cast back to fp16 if needed
             if needs_upcasting:
@@ -2033,12 +1979,12 @@ class SDXLLongPromptWeightingPipeline(
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         ip_adapter_image: Optional[PipelineImageInput] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -2108,12 +2054,12 @@ class SDXLLongPromptWeightingPipeline(
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         ip_adapter_image: Optional[PipelineImageInput] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -2173,7 +2119,7 @@ class SDXLLongPromptWeightingPipeline(
         prompt_2: Optional[str] = None,
         image: Optional[PipelineImageInput] = None,
         mask_image: Optional[PipelineImageInput] = None,
-        masked_image_latents: Optional[torch.FloatTensor] = None,
+        masked_image_latents: Optional[torch.Tensor] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         strength: float = 0.8,
@@ -2187,12 +2133,12 @@ class SDXLLongPromptWeightingPipeline(
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         ip_adapter_image: Optional[PipelineImageInput] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -2248,7 +2194,7 @@ class SDXLLongPromptWeightingPipeline(
             **kwargs,
         )
 
-    # Overrride to properly handle the loading and unloading of the additional text encoder.
+    # Override to properly handle the loading and unloading of the additional text encoder.
     def load_lora_weights(self, pretrained_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]], **kwargs):
         # We could have accessed the unet config from `lora_state_dict()` too. We pass
         # it here explicitly to be able to tell that it's coming from an SDXL
@@ -2282,7 +2228,7 @@ class SDXLLongPromptWeightingPipeline(
 
     @classmethod
     def save_lora_weights(
-        self,
+        cls,
         save_directory: Union[str, os.PathLike],
         unet_lora_layers: Dict[str, Union[torch.nn.Module, torch.Tensor]] = None,
         text_encoder_lora_layers: Dict[str, Union[torch.nn.Module, torch.Tensor]] = None,
@@ -2305,7 +2251,7 @@ class SDXLLongPromptWeightingPipeline(
             state_dict.update(pack_weights(text_encoder_lora_layers, "text_encoder"))
             state_dict.update(pack_weights(text_encoder_2_lora_layers, "text_encoder_2"))
 
-        self.write_lora_layers(
+        cls.write_lora_layers(
             state_dict=state_dict,
             save_directory=save_directory,
             is_main_process=is_main_process,

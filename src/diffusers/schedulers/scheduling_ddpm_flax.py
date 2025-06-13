@@ -61,7 +61,7 @@ class FlaxDDPMScheduler(FlaxSchedulerMixin, ConfigMixin):
     [`SchedulerMixin`] provides general loading and saving functionality via the [`SchedulerMixin.save_pretrained`] and
     [`~SchedulerMixin.from_pretrained`] functions.
 
-    For more details, see the original paper: https://arxiv.org/abs/2006.11239
+    For more details, see the original paper: https://huggingface.co/papers/2006.11239
 
     Args:
         num_train_timesteps (`int`): number of diffusion steps used to train the model.
@@ -163,7 +163,7 @@ class FlaxDDPMScheduler(FlaxSchedulerMixin, ConfigMixin):
         alpha_prod_t = state.common.alphas_cumprod[t]
         alpha_prod_t_prev = jnp.where(t > 0, state.common.alphas_cumprod[t - 1], jnp.array(1.0, dtype=self.dtype))
 
-        # For t > 0, compute predicted variance βt (see formula (6) and (7) from https://arxiv.org/pdf/2006.11239.pdf)
+        # For t > 0, compute predicted variance βt (see formula (6) and (7) from https://huggingface.co/papers/2006.11239)
         # and sample from it to get previous sample
         # x_{t-1} ~ N(pred_prev_sample, variance) == add variance to pred_sample
         variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * state.common.betas[t]
@@ -174,7 +174,7 @@ class FlaxDDPMScheduler(FlaxSchedulerMixin, ConfigMixin):
         # hacks - were probably added for training stability
         if variance_type == "fixed_small":
             variance = jnp.clip(variance, a_min=1e-20)
-        # for rl-diffuser https://arxiv.org/abs/2205.09991
+        # for rl-diffuser https://huggingface.co/papers/2205.09991
         elif variance_type == "fixed_small_log":
             variance = jnp.log(jnp.clip(variance, a_min=1e-20))
         elif variance_type == "fixed_large":
@@ -222,9 +222,13 @@ class FlaxDDPMScheduler(FlaxSchedulerMixin, ConfigMixin):
         t = timestep
 
         if key is None:
-            key = jax.random.PRNGKey(0)
+            key = jax.random.key(0)
 
-        if model_output.shape[1] == sample.shape[1] * 2 and self.config.variance_type in ["learned", "learned_range"]:
+        if (
+            len(model_output.shape) > 1
+            and model_output.shape[1] == sample.shape[1] * 2
+            and self.config.variance_type in ["learned", "learned_range"]
+        ):
             model_output, predicted_variance = jnp.split(model_output, sample.shape[1], axis=1)
         else:
             predicted_variance = None
@@ -236,7 +240,7 @@ class FlaxDDPMScheduler(FlaxSchedulerMixin, ConfigMixin):
         beta_prod_t_prev = 1 - alpha_prod_t_prev
 
         # 2. compute predicted original sample from predicted noise also called
-        # "predicted x_0" of formula (15) from https://arxiv.org/pdf/2006.11239.pdf
+        # "predicted x_0" of formula (15) from https://huggingface.co/papers/2006.11239
         if self.config.prediction_type == "epsilon":
             pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
         elif self.config.prediction_type == "sample":
@@ -254,17 +258,17 @@ class FlaxDDPMScheduler(FlaxSchedulerMixin, ConfigMixin):
             pred_original_sample = jnp.clip(pred_original_sample, -1, 1)
 
         # 4. Compute coefficients for pred_original_sample x_0 and current sample x_t
-        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
+        # See formula (7) from https://huggingface.co/papers/2006.11239
         pred_original_sample_coeff = (alpha_prod_t_prev ** (0.5) * state.common.betas[t]) / beta_prod_t
         current_sample_coeff = state.common.alphas[t] ** (0.5) * beta_prod_t_prev / beta_prod_t
 
         # 5. Compute predicted previous sample µ_t
-        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
+        # See formula (7) from https://huggingface.co/papers/2006.11239
         pred_prev_sample = pred_original_sample_coeff * pred_original_sample + current_sample_coeff * sample
 
         # 6. Add noise
         def random_variance():
-            split_key = jax.random.split(key, num=1)
+            split_key = jax.random.split(key, num=1)[0]
             noise = jax.random.normal(split_key, shape=model_output.shape, dtype=self.dtype)
             return (self._get_variance(state, t, predicted_variance=predicted_variance) ** 0.5) * noise
 

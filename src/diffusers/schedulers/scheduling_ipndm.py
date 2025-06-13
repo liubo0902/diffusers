@@ -49,7 +49,7 @@ class IPNDMScheduler(SchedulerMixin, ConfigMixin):
         self.init_noise_sigma = 1.0
 
         # For now we only support F-PNDM, i.e. the runge-kutta method
-        # For more information on the algorithm please take a look at the paper: https://arxiv.org/pdf/2202.09778.pdf
+        # For more information on the algorithm please take a look at the paper: https://huggingface.co/papers/2202.09778
         # mainly at formula (9), (12), (13) and the Algorithm 2.
         self.pndm_order = 4
 
@@ -61,7 +61,7 @@ class IPNDMScheduler(SchedulerMixin, ConfigMixin):
     @property
     def step_index(self):
         """
-        The index counter for current timestep. It will increae 1 after each scheduler step.
+        The index counter for current timestep. It will increase 1 after each scheduler step.
         """
         return self._step_index
 
@@ -137,9 +137,9 @@ class IPNDMScheduler(SchedulerMixin, ConfigMixin):
 
     def step(
         self,
-        model_output: torch.FloatTensor,
-        timestep: int,
-        sample: torch.FloatTensor,
+        model_output: torch.Tensor,
+        timestep: Union[int, torch.Tensor],
+        sample: torch.Tensor,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """
@@ -147,11 +147,11 @@ class IPNDMScheduler(SchedulerMixin, ConfigMixin):
         the linear multistep method. It performs one forward pass multiple times to approximate the solution.
 
         Args:
-            model_output (`torch.FloatTensor`):
+            model_output (`torch.Tensor`):
                 The direct output from learned diffusion model.
             timestep (`int`):
                 The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 A current instance of a sample created by the diffusion process.
             return_dict (`bool`):
                 Whether or not to return a [`~schedulers.scheduling_utils.SchedulerOutput`] or tuple.
@@ -193,17 +193,17 @@ class IPNDMScheduler(SchedulerMixin, ConfigMixin):
 
         return SchedulerOutput(prev_sample=prev_sample)
 
-    def scale_model_input(self, sample: torch.FloatTensor, *args, **kwargs) -> torch.FloatTensor:
+    def scale_model_input(self, sample: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         """
         Ensures interchangeability with schedulers that need to scale the denoising model input depending on the
         current timestep.
 
         Args:
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 The input sample.
 
         Returns:
-            `torch.FloatTensor`:
+            `torch.Tensor`:
                 A scaled input sample.
         """
         return sample

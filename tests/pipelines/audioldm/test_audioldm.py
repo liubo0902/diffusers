@@ -37,7 +37,7 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.utils import is_xformers_available
-from diffusers.utils.testing_utils import enable_full_determinism, nightly, torch_device
+from diffusers.utils.testing_utils import backend_empty_cache, enable_full_determinism, nightly, torch_device
 
 from ..pipeline_params import TEXT_TO_AUDIO_BATCH_PARAMS, TEXT_TO_AUDIO_PARAMS
 from ..test_pipelines_common import PipelineTesterMixin
@@ -63,19 +63,22 @@ class AudioLDMPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         ]
     )
 
+    supports_dduf = False
+
     def get_dummy_components(self):
         torch.manual_seed(0)
         unet = UNet2DConditionModel(
-            block_out_channels=(32, 64),
-            layers_per_block=2,
+            block_out_channels=(8, 16),
+            layers_per_block=1,
+            norm_num_groups=8,
             sample_size=32,
             in_channels=4,
             out_channels=4,
             down_block_types=("DownBlock2D", "CrossAttnDownBlock2D"),
             up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
-            cross_attention_dim=(32, 64),
+            cross_attention_dim=(8, 16),
             class_embed_type="simple_projection",
-            projection_class_embeddings_input_dim=32,
+            projection_class_embeddings_input_dim=8,
             class_embeddings_concat=True,
         )
         scheduler = DDIMScheduler(
@@ -87,9 +90,10 @@ class AudioLDMPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         )
         torch.manual_seed(0)
         vae = AutoencoderKL(
-            block_out_channels=[32, 64],
+            block_out_channels=[8, 16],
             in_channels=1,
             out_channels=1,
+            norm_num_groups=8,
             down_block_types=["DownEncoderBlock2D", "DownEncoderBlock2D"],
             up_block_types=["UpDecoderBlock2D", "UpDecoderBlock2D"],
             latent_channels=4,
@@ -98,14 +102,14 @@ class AudioLDMPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         text_encoder_config = ClapTextConfig(
             bos_token_id=0,
             eos_token_id=2,
-            hidden_size=32,
+            hidden_size=8,
             intermediate_size=37,
             layer_norm_eps=1e-05,
-            num_attention_heads=4,
-            num_hidden_layers=5,
+            num_attention_heads=1,
+            num_hidden_layers=1,
             pad_token_id=1,
             vocab_size=1000,
-            projection_dim=32,
+            projection_dim=8,
         )
         text_encoder = ClapTextModelWithProjection(text_encoder_config)
         tokenizer = RobertaTokenizer.from_pretrained("hf-internal-testing/tiny-random-roberta", model_max_length=77)
@@ -371,10 +375,15 @@ class AudioLDMPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
 @nightly
 class AudioLDMPipelineSlowTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def get_inputs(self, device, generator_device="cpu", dtype=torch.float32, seed=0):
         generator = torch.Generator(device=generator_device).manual_seed(seed)
@@ -411,10 +420,15 @@ class AudioLDMPipelineSlowTests(unittest.TestCase):
 
 @nightly
 class AudioLDMPipelineNightlyTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def get_inputs(self, device, generator_device="cpu", dtype=torch.float32, seed=0):
         generator = torch.Generator(device=generator_device).manual_seed(seed)

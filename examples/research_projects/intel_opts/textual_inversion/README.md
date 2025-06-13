@@ -1,6 +1,6 @@
 ## Textual Inversion fine-tuning example
 
-[Textual inversion](https://arxiv.org/abs/2208.01618) is a method to personalize text2image models like stable diffusion on your own images using just 3-5 examples.
+[Textual inversion](https://huggingface.co/papers/2208.01618) is a method to personalize text2image models like stable diffusion on your own images using just 3-5 examples.
 The `textual_inversion.py` script shows how to implement the training procedure and adapt it for stable diffusion.
 
 ## Training with Intel Extension for PyTorch
@@ -52,7 +52,7 @@ python -m intel_extension_for_pytorch.cpu.launch --distributed \
   --train_data_dir=$DATA_DIR \
   --learnable_property="object" \
   --placeholder_token="<dicoo>" --initializer_token="toy" \
-  --seed=7 \ 
+  --seed=7 \
   --resolution=512 \
   --train_batch_size=1 \
   --gradient_accumulation_steps=1 \

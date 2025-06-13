@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -60,7 +60,7 @@ if is_wandb_available():
     import wandb
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.27.0.dev0")
+check_min_version("0.34.0.dev0")
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,7 @@ def log_validation(pipeline, pipeline_params, controlnet_params, tokenizer, args
 
         wandb.log({"validation": formatted_images})
     else:
-        logger.warn(f"image logging not implemented for {args.report_to}")
+        logger.warning(f"image logging not implemented for {args.report_to}")
 
     return image_logs
 
@@ -169,6 +169,7 @@ These are controlnet weights trained on {base_model} with new type of conditioni
         "diffusers",
         "controlnet",
         "jax-diffusers-event",
+        "diffusers-training",
     ]
     model_card = populate_model_card(model_card, tags=tags)
 
@@ -304,7 +305,7 @@ def parse_args():
         type=float,
         default=None,
         help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
-        "More details here: https://arxiv.org/abs/2303.09556.",
+        "More details here: https://huggingface.co/papers/2303.09556.",
     )
     parser.add_argument(
         "--dataloader_num_workers",

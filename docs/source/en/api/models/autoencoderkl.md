@@ -12,7 +12,7 @@ specific language governing permissions and limitations under the License.
 
 # AutoencoderKL
 
-The variational autoencoder (VAE) model with KL loss was introduced in [Auto-Encoding Variational Bayes](https://arxiv.org/abs/1312.6114v11) by Diederik P. Kingma and Max Welling. The model is used in 🤗 Diffusers to encode images into latents and to decode latent representations into images.
+The variational autoencoder (VAE) model with KL loss was introduced in [Auto-Encoding Variational Bayes](https://huggingface.co/papers/1312.6114v11) by Diederik P. Kingma and Max Welling. The model is used in 🤗 Diffusers to encode images into latents and to decode latent representations into images.
 
 The abstract from the paper is:
 
@@ -21,7 +21,7 @@ The abstract from the paper is:
 ## Loading from the original format
 
 By default the [`AutoencoderKL`] should be loaded with [`~ModelMixin.from_pretrained`], but it can also be loaded
-from the original format using [`FromOriginalVAEMixin.from_single_file`] as follows:
+from the original format using [`FromOriginalModelMixin.from_single_file`] as follows:
 
 ```py
 from diffusers import AutoencoderKL

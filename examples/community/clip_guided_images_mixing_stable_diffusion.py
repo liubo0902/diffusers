@@ -7,17 +7,17 @@ import PIL.Image
 import torch
 from torch.nn import functional as F
 from torchvision import transforms
-from transformers import CLIPFeatureExtractor, CLIPModel, CLIPTextModel, CLIPTokenizer
+from transformers import CLIPImageProcessor, CLIPModel, CLIPTextModel, CLIPTokenizer
 
 from diffusers import (
     AutoencoderKL,
     DDIMScheduler,
-    DiffusionPipeline,
     DPMSolverMultistepScheduler,
     LMSDiscreteScheduler,
     PNDMScheduler,
     UNet2DConditionModel,
 )
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.utils import PIL_INTERPOLATION
 from diffusers.utils.torch_utils import randn_tensor
@@ -77,7 +77,7 @@ def set_requires_grad(model, value):
         param.requires_grad = value
 
 
-class CLIPGuidedImagesMixingStableDiffusion(DiffusionPipeline):
+class CLIPGuidedImagesMixingStableDiffusion(DiffusionPipeline, StableDiffusionMixin):
     def __init__(
         self,
         vae: AutoencoderKL,
@@ -86,7 +86,7 @@ class CLIPGuidedImagesMixingStableDiffusion(DiffusionPipeline):
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
         scheduler: Union[PNDMScheduler, LMSDiscreteScheduler, DDIMScheduler, DPMSolverMultistepScheduler],
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
         coca_model=None,
         coca_tokenizer=None,
         coca_transform=None,
@@ -112,16 +112,6 @@ class CLIPGuidedImagesMixingStableDiffusion(DiffusionPipeline):
         self.normalize = transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std)
         set_requires_grad(self.text_encoder, False)
         set_requires_grad(self.clip_model, False)
-
-    def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
-        if slice_size == "auto":
-            # half the attention head size is usually a good trade-off between
-            # speed and memory
-            slice_size = self.unet.config.attention_head_dim // 2
-        self.unet.set_attention_slice(slice_size)
-
-    def disable_attention_slicing(self):
-        self.enable_attention_slicing(None)
 
     def freeze_vae(self):
         set_requires_grad(self.vae, False)
@@ -207,7 +197,7 @@ class CLIPGuidedImagesMixingStableDiffusion(DiffusionPipeline):
             alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
             beta_prod_t = 1 - alpha_prod_t
             # compute predicted original sample from predicted noise also called
-            # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+            # "predicted x_0" of formula (12) from https://huggingface.co/papers/2010.02502
             pred_original_sample = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
 
             fac = torch.sqrt(beta_prod_t)
@@ -243,8 +233,8 @@ class CLIPGuidedImagesMixingStableDiffusion(DiffusionPipeline):
     @torch.no_grad()
     def __call__(
         self,
-        style_image: Union[torch.FloatTensor, PIL.Image.Image],
-        content_image: Union[torch.FloatTensor, PIL.Image.Image],
+        style_image: Union[torch.Tensor, PIL.Image.Image],
+        content_image: Union[torch.Tensor, PIL.Image.Image],
         style_prompt: Optional[str] = None,
         content_prompt: Optional[str] = None,
         height: Optional[int] = 512,
@@ -353,7 +343,7 @@ class CLIPGuidedImagesMixingStableDiffusion(DiffusionPipeline):
             )
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+        # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
         # get unconditional embeddings for classifier free guidance
@@ -394,7 +384,7 @@ class CLIPGuidedImagesMixingStableDiffusion(DiffusionPipeline):
 
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
+        # eta corresponds to η in DDIM paper: https://huggingface.co/papers/2010.02502
         # and should be between [0, 1]
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
         extra_step_kwargs = {}

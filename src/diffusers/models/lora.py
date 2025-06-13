@@ -38,7 +38,7 @@ if is_transformers_available():
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-def text_encoder_attn_modules(text_encoder):
+def text_encoder_attn_modules(text_encoder: nn.Module):
     attn_modules = []
 
     if isinstance(text_encoder, (CLIPTextModel, CLIPTextModelWithProjection)):
@@ -52,7 +52,7 @@ def text_encoder_attn_modules(text_encoder):
     return attn_modules
 
 
-def text_encoder_mlp_modules(text_encoder):
+def text_encoder_mlp_modules(text_encoder: nn.Module):
     mlp_modules = []
 
     if isinstance(text_encoder, (CLIPTextModel, CLIPTextModelWithProjection)):
@@ -204,6 +204,9 @@ class LoRALinearLayer(nn.Module):
     ):
         super().__init__()
 
+        deprecation_message = "Use of `LoRALinearLayer` is deprecated. Please switch to PEFT backend by installing PEFT: `pip install peft`."
+        deprecate("LoRALinearLayer", "1.0.0", deprecation_message)
+
         self.down = nn.Linear(in_features, rank, bias=False, device=device, dtype=dtype)
         self.up = nn.Linear(rank, out_features, bias=False, device=device, dtype=dtype)
         # This value has the same meaning as the `--network_alpha` option in the kohya-ss trainer script.
@@ -263,6 +266,9 @@ class LoRAConv2dLayer(nn.Module):
         network_alpha: Optional[float] = None,
     ):
         super().__init__()
+
+        deprecation_message = "Use of `LoRAConv2dLayer` is deprecated. Please switch to PEFT backend by installing PEFT: `pip install peft`."
+        deprecate("LoRAConv2dLayer", "1.0.0", deprecation_message)
 
         self.down = nn.Conv2d(in_features, rank, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)
         # according to the official kohya_ss trainer kernel_size are always fixed for the up layer
@@ -361,16 +367,19 @@ class LoRACompatibleConv(nn.Conv2d):
         self.w_down = None
 
     def forward(self, hidden_states: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
-        if self.lora_layer is None:
-            # make sure to the functional Conv2D function as otherwise torch.compile's graph will break
-            # see: https://github.com/huggingface/diffusers/pull/4315
-            return F.conv2d(
-                hidden_states, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups
-            )
+        if self.padding_mode != "zeros":
+            hidden_states = F.pad(hidden_states, self._reversed_padding_repeated_twice, mode=self.padding_mode)
+            padding = (0, 0)
         else:
-            original_outputs = F.conv2d(
-                hidden_states, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups
-            )
+            padding = self.padding
+
+        original_outputs = F.conv2d(
+            hidden_states, self.weight, self.bias, self.stride, padding, self.dilation, self.groups
+        )
+
+        if self.lora_layer is None:
+            return original_outputs
+        else:
             return original_outputs + (scale * self.lora_layer(hidden_states))
 
 

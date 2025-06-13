@@ -35,16 +35,16 @@ class DDIMParallelSchedulerOutput(BaseOutput):
     Output class for the scheduler's `step` function output.
 
     Args:
-        prev_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
+        prev_sample (`torch.Tensor` of shape `(batch_size, num_channels, height, width)` for images):
             Computed sample `(x_{t-1})` of previous timestep. `prev_sample` should be used as next model input in the
             denoising loop.
-        pred_original_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
+        pred_original_sample (`torch.Tensor` of shape `(batch_size, num_channels, height, width)` for images):
             The predicted denoised sample `(x_{0})` based on the model output from the current timestep.
             `pred_original_sample` can be used to preview progress or for guidance.
     """
 
-    prev_sample: torch.FloatTensor
-    pred_original_sample: Optional[torch.FloatTensor] = None
+    prev_sample: torch.Tensor
+    pred_original_sample: Optional[torch.Tensor] = None
 
 
 # Copied from diffusers.schedulers.scheduling_ddpm.betas_for_alpha_bar
@@ -82,7 +82,7 @@ def betas_for_alpha_bar(
             return math.exp(t * -12.0)
 
     else:
-        raise ValueError(f"Unsupported alpha_tranform_type: {alpha_transform_type}")
+        raise ValueError(f"Unsupported alpha_transform_type: {alpha_transform_type}")
 
     betas = []
     for i in range(num_diffusion_timesteps):
@@ -95,15 +95,15 @@ def betas_for_alpha_bar(
 # Copied from diffusers.schedulers.scheduling_ddim.rescale_zero_terminal_snr
 def rescale_zero_terminal_snr(betas):
     """
-    Rescales betas to have zero terminal SNR Based on https://arxiv.org/pdf/2305.08891.pdf (Algorithm 1)
+    Rescales betas to have zero terminal SNR Based on https://huggingface.co/papers/2305.08891 (Algorithm 1)
 
 
     Args:
-        betas (`torch.FloatTensor`):
+        betas (`torch.Tensor`):
             the betas that the scheduler is being initialized with.
 
     Returns:
-        `torch.FloatTensor`: rescaled betas with zero terminal SNR
+        `torch.Tensor`: rescaled betas with zero terminal SNR
     """
     # Convert betas to alphas_bar_sqrt
     alphas = 1.0 - betas
@@ -139,7 +139,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
     [`SchedulerMixin`] provides general loading and saving functionality via the [`SchedulerMixin.save_pretrained`] and
     [`~SchedulerMixin.from_pretrained`] functions.
 
-    For more details, see the original paper: https://arxiv.org/abs/2010.02502
+    For more details, see the original paper: https://huggingface.co/papers/2010.02502
 
     Args:
         num_train_timesteps (`int`): number of diffusion steps used to train the model.
@@ -159,29 +159,27 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
             step there is no previous alpha. When this option is `True` the previous alpha product is fixed to `1`,
             otherwise it uses the value of alpha at step 0.
         steps_offset (`int`, default `0`):
-            an offset added to the inference steps. You can use a combination of `offset=1` and
-            `set_alpha_to_one=False`, to make the last step use step 0 for the previous alpha product, as done in
-            stable diffusion.
+            An offset added to the inference steps, as required by some model families.
         prediction_type (`str`, default `epsilon`, optional):
             prediction type of the scheduler function, one of `epsilon` (predicting the noise of the diffusion
             process), `sample` (directly predicting the noisy sample`) or `v_prediction` (see section 2.4
             https://imagen.research.google/video/paper.pdf)
         thresholding (`bool`, default `False`):
-            whether to use the "dynamic thresholding" method (introduced by Imagen, https://arxiv.org/abs/2205.11487).
-            Note that the thresholding method is unsuitable for latent-space diffusion models (such as
-            stable-diffusion).
+            whether to use the "dynamic thresholding" method (introduced by Imagen,
+            https://huggingface.co/papers/2205.11487). Note that the thresholding method is unsuitable for latent-space
+            diffusion models (such as stable-diffusion).
         dynamic_thresholding_ratio (`float`, default `0.995`):
             the ratio for the dynamic thresholding method. Default is `0.995`, the same as Imagen
-            (https://arxiv.org/abs/2205.11487). Valid only when `thresholding=True`.
+            (https://huggingface.co/papers/2205.11487). Valid only when `thresholding=True`.
         sample_max_value (`float`, default `1.0`):
             the threshold value for dynamic thresholding. Valid only when `thresholding=True`.
         timestep_spacing (`str`, default `"leading"`):
             The way the timesteps should be scaled. Refer to Table 2. of [Common Diffusion Noise Schedules and Sample
-            Steps are Flawed](https://arxiv.org/abs/2305.08891) for more information.
+            Steps are Flawed](https://huggingface.co/papers/2305.08891) for more information.
         rescale_betas_zero_snr (`bool`, default `False`):
-            whether to rescale the betas to have zero terminal SNR (proposed by https://arxiv.org/pdf/2305.08891.pdf).
-            This can enable the model to generate very bright and dark samples instead of limiting it to samples with
-            medium brightness. Loosely related to
+            whether to rescale the betas to have zero terminal SNR (proposed by
+            https://huggingface.co/papers/2305.08891). This can enable the model to generate very bright and dark
+            samples instead of limiting it to samples with medium brightness. Loosely related to
             [`--offset_noise`](https://github.com/huggingface/diffusers/blob/74fd735eb073eb1d774b1ab4154a0876eb82f055/examples/dreambooth/train_dreambooth.py#L506).
     """
 
@@ -220,7 +218,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
             # Glide cosine schedule
             self.betas = betas_for_alpha_bar(num_train_timesteps)
         else:
-            raise NotImplementedError(f"{beta_schedule} does is not implemented for {self.__class__}")
+            raise NotImplementedError(f"{beta_schedule} is not implemented for {self.__class__}")
 
         # Rescale for zero SNR
         if rescale_betas_zero_snr:
@@ -243,19 +241,19 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
         self.timesteps = torch.from_numpy(np.arange(0, num_train_timesteps)[::-1].copy().astype(np.int64))
 
     # Copied from diffusers.schedulers.scheduling_ddim.DDIMScheduler.scale_model_input
-    def scale_model_input(self, sample: torch.FloatTensor, timestep: Optional[int] = None) -> torch.FloatTensor:
+    def scale_model_input(self, sample: torch.Tensor, timestep: Optional[int] = None) -> torch.Tensor:
         """
         Ensures interchangeability with schedulers that need to scale the denoising model input depending on the
         current timestep.
 
         Args:
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 The input sample.
             timestep (`int`, *optional*):
                 The current timestep in the diffusion chain.
 
         Returns:
-            `torch.FloatTensor`:
+            `torch.Tensor`:
                 A scaled input sample.
         """
         return sample
@@ -285,7 +283,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
         return variance
 
     # Copied from diffusers.schedulers.scheduling_ddpm.DDPMScheduler._threshold_sample
-    def _threshold_sample(self, sample: torch.FloatTensor) -> torch.FloatTensor:
+    def _threshold_sample(self, sample: torch.Tensor) -> torch.Tensor:
         """
         "Dynamic thresholding: At each sampling step we set s to a certain percentile absolute pixel value in xt0 (the
         prediction of x_0 at timestep t), and if s > 1, then we threshold xt0 to the range [-s, s] and then divide by
@@ -293,7 +291,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
         pixels from saturation at each step. We find that dynamic thresholding results in significantly better
         photorealism as well as better image-text alignment, especially when using very large guidance weights."
 
-        https://arxiv.org/abs/2205.11487
+        https://huggingface.co/papers/2205.11487
         """
         dtype = sample.dtype
         batch_size, channels, *remaining_dims = sample.shape
@@ -337,7 +335,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
 
         self.num_inference_steps = num_inference_steps
 
-        # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://arxiv.org/abs/2305.08891
+        # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://huggingface.co/papers/2305.08891
         if self.config.timestep_spacing == "linspace":
             timesteps = (
                 np.linspace(0, self.config.num_train_timesteps - 1, num_inference_steps)
@@ -366,13 +364,13 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
 
     def step(
         self,
-        model_output: torch.FloatTensor,
+        model_output: torch.Tensor,
         timestep: int,
-        sample: torch.FloatTensor,
+        sample: torch.Tensor,
         eta: float = 0.0,
         use_clipped_model_output: bool = False,
         generator=None,
-        variance_noise: Optional[torch.FloatTensor] = None,
+        variance_noise: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ) -> Union[DDIMParallelSchedulerOutput, Tuple]:
         """
@@ -380,9 +378,9 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
         process from the learned model outputs (most often the predicted noise).
 
         Args:
-            model_output (`torch.FloatTensor`): direct output from learned diffusion model.
+            model_output (`torch.Tensor`): direct output from learned diffusion model.
             timestep (`int`): current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 current instance of sample being created by diffusion process.
             eta (`float`): weight of noise for added noise in diffusion step.
             use_clipped_model_output (`bool`): if `True`, compute "corrected" `model_output` from the clipped
@@ -390,9 +388,9 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
                 `self.config.clip_sample` is `True`. If no clipping has happened, "corrected" `model_output` would
                 coincide with the one provided as input and `use_clipped_model_output` will have not effect.
             generator: random number generator.
-            variance_noise (`torch.FloatTensor`): instead of generating noise for the variance using `generator`, we
+            variance_noise (`torch.Tensor`): instead of generating noise for the variance using `generator`, we
                 can directly provide the noise for the variance itself. This is useful for methods such as
-                CycleDiffusion. (https://arxiv.org/abs/2210.05559)
+                CycleDiffusion. (https://huggingface.co/papers/2210.05559)
             return_dict (`bool`): option for returning tuple rather than DDIMParallelSchedulerOutput class
 
         Returns:
@@ -406,7 +404,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
                 "Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler"
             )
 
-        # See formulas (12) and (16) of DDIM paper https://arxiv.org/pdf/2010.02502.pdf
+        # See formulas (12) and (16) of DDIM paper https://huggingface.co/papers/2010.02502
         # Ideally, read DDIM paper in-detail understanding
 
         # Notation (<variable name> -> <name in paper>
@@ -427,7 +425,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
         beta_prod_t = 1 - alpha_prod_t
 
         # 3. compute predicted original sample from predicted noise also called
-        # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        # "predicted x_0" of formula (12) from https://huggingface.co/papers/2010.02502
         if self.config.prediction_type == "epsilon":
             pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
             pred_epsilon = model_output
@@ -460,10 +458,10 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
             # the pred_epsilon is always re-derived from the clipped x_0 in Glide
             pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
 
-        # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        # 6. compute "direction pointing to x_t" of formula (12) from https://huggingface.co/papers/2010.02502
         pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * pred_epsilon
 
-        # 7. compute x_t without "random noise" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        # 7. compute x_t without "random noise" of formula (12) from https://huggingface.co/papers/2010.02502
         prev_sample = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
 
         if eta > 0:
@@ -482,18 +480,21 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
             prev_sample = prev_sample + variance
 
         if not return_dict:
-            return (prev_sample,)
+            return (
+                prev_sample,
+                pred_original_sample,
+            )
 
         return DDIMParallelSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
 
     def batch_step_no_noise(
         self,
-        model_output: torch.FloatTensor,
+        model_output: torch.Tensor,
         timesteps: List[int],
-        sample: torch.FloatTensor,
+        sample: torch.Tensor,
         eta: float = 0.0,
         use_clipped_model_output: bool = False,
-    ) -> torch.FloatTensor:
+    ) -> torch.Tensor:
         """
         Batched version of the `step` function, to be able to reverse the SDE for multiple samples/timesteps at once.
         Also, does not add any noise to the predicted sample, which is necessary for parallel sampling where the noise
@@ -503,10 +504,10 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
         process from the learned model outputs (most often the predicted noise).
 
         Args:
-            model_output (`torch.FloatTensor`): direct output from learned diffusion model.
+            model_output (`torch.Tensor`): direct output from learned diffusion model.
             timesteps (`List[int]`):
                 current discrete timesteps in the diffusion chain. This is now a list of integers.
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 current instance of sample being created by diffusion process.
             eta (`float`): weight of noise for added noise in diffusion step.
             use_clipped_model_output (`bool`): if `True`, compute "corrected" `model_output` from the clipped
@@ -515,7 +516,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
                 coincide with the one provided as input and `use_clipped_model_output` will have not effect.
 
         Returns:
-            `torch.FloatTensor`: sample tensor at previous timestep.
+            `torch.Tensor`: sample tensor at previous timestep.
 
         """
         if self.num_inference_steps is None:
@@ -525,7 +526,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
 
         assert eta == 0.0
 
-        # See formulas (12) and (16) of DDIM paper https://arxiv.org/pdf/2010.02502.pdf
+        # See formulas (12) and (16) of DDIM paper https://huggingface.co/papers/2010.02502
         # Ideally, read DDIM paper in-detail understanding
 
         # Notation (<variable name> -> <name in paper>
@@ -553,7 +554,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
         beta_prod_t = 1 - alpha_prod_t
 
         # 3. compute predicted original sample from predicted noise also called
-        # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        # "predicted x_0" of formula (12) from https://huggingface.co/papers/2010.02502
         if self.config.prediction_type == "epsilon":
             pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
             pred_epsilon = model_output
@@ -586,10 +587,10 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
             # the pred_epsilon is always re-derived from the clipped x_0 in Glide
             pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
 
-        # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        # 6. compute "direction pointing to x_t" of formula (12) from https://huggingface.co/papers/2010.02502
         pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * pred_epsilon
 
-        # 7. compute x_t without "random noise" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        # 7. compute x_t without "random noise" of formula (12) from https://huggingface.co/papers/2010.02502
         prev_sample = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
 
         return prev_sample
@@ -597,10 +598,10 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
     # Copied from diffusers.schedulers.scheduling_ddpm.DDPMScheduler.add_noise
     def add_noise(
         self,
-        original_samples: torch.FloatTensor,
-        noise: torch.FloatTensor,
+        original_samples: torch.Tensor,
+        noise: torch.Tensor,
         timesteps: torch.IntTensor,
-    ) -> torch.FloatTensor:
+    ) -> torch.Tensor:
         # Make sure alphas_cumprod and timestep have same device and dtype as original_samples
         # Move the self.alphas_cumprod to device to avoid redundant CPU to GPU data movement
         # for the subsequent add_noise calls
@@ -622,9 +623,7 @@ class DDIMParallelScheduler(SchedulerMixin, ConfigMixin):
         return noisy_samples
 
     # Copied from diffusers.schedulers.scheduling_ddpm.DDPMScheduler.get_velocity
-    def get_velocity(
-        self, sample: torch.FloatTensor, noise: torch.FloatTensor, timesteps: torch.IntTensor
-    ) -> torch.FloatTensor:
+    def get_velocity(self, sample: torch.Tensor, noise: torch.Tensor, timesteps: torch.IntTensor) -> torch.Tensor:
         # Make sure alphas_cumprod and timestep have same device and dtype as sample
         self.alphas_cumprod = self.alphas_cumprod.to(device=sample.device)
         alphas_cumprod = self.alphas_cumprod.to(dtype=sample.dtype)

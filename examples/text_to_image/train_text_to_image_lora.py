@@ -1,5 +1,6 @@
+#!/usr/bin/env python
 # coding=utf-8
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,6 +21,7 @@ import math
 import os
 import random
 import shutil
+from contextlib import nullcontext
 from pathlib import Path
 
 import datasets
@@ -50,19 +52,27 @@ from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 
 
+if is_wandb_available():
+    import wandb
+
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.27.0.dev0")
+check_min_version("0.34.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
 
 def save_model_card(
-    repo_id: str, images: list = None, base_model: str = None, dataset_name: str = None, repo_folder: str = None
+    repo_id: str,
+    images: list = None,
+    base_model: str = None,
+    dataset_name: str = None,
+    repo_folder: str = None,
 ):
     img_str = ""
-    for i, image in enumerate(images):
-        image.save(os.path.join(repo_folder, f"image_{i}.png"))
-        img_str += f"![img_{i}](./image_{i}.png)\n"
+    if images is not None:
+        for i, image in enumerate(images):
+            image.save(os.path.join(repo_folder, f"image_{i}.png"))
+            img_str += f"![img_{i}](./image_{i}.png)\n"
 
     model_description = f"""
 # LoRA text2image fine-tuning - {repo_id}
@@ -84,11 +94,54 @@ These are LoRA adaption weights for {base_model}. The weights were fine-tuned on
         "stable-diffusion-diffusers",
         "text-to-image",
         "diffusers",
+        "diffusers-training",
         "lora",
     ]
     model_card = populate_model_card(model_card, tags=tags)
 
     model_card.save(os.path.join(repo_folder, "README.md"))
+
+
+def log_validation(
+    pipeline,
+    args,
+    accelerator,
+    epoch,
+    is_final_validation=False,
+):
+    logger.info(
+        f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
+        f" {args.validation_prompt}."
+    )
+    pipeline = pipeline.to(accelerator.device)
+    pipeline.set_progress_bar_config(disable=True)
+    generator = torch.Generator(device=accelerator.device)
+    if args.seed is not None:
+        generator = generator.manual_seed(args.seed)
+    images = []
+    if torch.backends.mps.is_available():
+        autocast_ctx = nullcontext()
+    else:
+        autocast_ctx = torch.autocast(accelerator.device.type)
+
+    with autocast_ctx:
+        for _ in range(args.num_validation_images):
+            images.append(pipeline(args.validation_prompt, num_inference_steps=30, generator=generator).images[0])
+
+    for tracker in accelerator.trackers:
+        phase_name = "test" if is_final_validation else "validation"
+        if tracker.name == "tensorboard":
+            np_images = np.stack([np.asarray(img) for img in images])
+            tracker.writer.add_images(phase_name, np_images, epoch, dataformats="NHWC")
+        if tracker.name == "wandb":
+            tracker.log(
+                {
+                    phase_name: [
+                        wandb.Image(image, caption=f"{i}: {args.validation_prompt}") for i, image in enumerate(images)
+                    ]
+                }
+            )
+    return images
 
 
 def parse_args():
@@ -261,7 +314,7 @@ def parse_args():
         type=float,
         default=None,
         help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
-        "More details here: https://arxiv.org/abs/2303.09556.",
+        "More details here: https://huggingface.co/papers/2303.09556.",
     )
     parser.add_argument(
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
@@ -293,7 +346,7 @@ def parse_args():
         "--prediction_type",
         type=str,
         default=None,
-        help="The prediction_type that shall be used for training. Choose between 'epsilon' or 'v_prediction' or leave `None`. If left to `None` the default prediction type of the scheduler: `noise_scheduler.config.prediciton_type` is chosen.",
+        help="The prediction_type that shall be used for training. Choose between 'epsilon' or 'v_prediction' or leave `None`. If left to `None` the default prediction type of the scheduler: `noise_scheduler.config.prediction_type` is chosen.",
     )
     parser.add_argument(
         "--hub_model_id",
@@ -365,6 +418,15 @@ def parse_args():
         default=4,
         help=("The dimension of the LoRA update matrices."),
     )
+    parser.add_argument(
+        "--image_interpolation_mode",
+        type=str,
+        default="lanczos",
+        choices=[
+            f.lower() for f in dir(transforms.InterpolationMode) if not f.startswith("__") and not f.endswith("__")
+        ],
+        help="The image interpolation method to use for resizing images.",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -379,7 +441,7 @@ def parse_args():
 
 
 DATASET_NAME_MAPPING = {
-    "lambdalabs/pokemon-blip-captions": ("image", "text"),
+    "lambdalabs/naruto-blip-captions": ("image", "text"),
 }
 
 
@@ -401,10 +463,10 @@ def main():
         log_with=args.report_to,
         project_config=accelerator_project_config,
     )
-    if args.report_to == "wandb":
-        if not is_wandb_available():
-            raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
-        import wandb
+
+    # Disable AMP for MPS.
+    if torch.backends.mps.is_available():
+        accelerator.native_amp = False
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -454,17 +516,13 @@ def main():
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
 
-    # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
+    # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
-
-    # Freeze the unet parameters before adding adapters
-    for param in unet.parameters():
-        param.requires_grad_(False)
 
     unet_lora_config = LoraConfig(
         r=args.rank,
@@ -490,7 +548,7 @@ def main():
 
             xformers_version = version.parse(xformers.__version__)
             if xformers_version == version.parse("0.0.16"):
-                logger.warn(
+                logger.warning(
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
@@ -600,10 +658,17 @@ def main():
         )
         return inputs.input_ids
 
-    # Preprocessing the datasets.
+    # Get the specified interpolation method from the args
+    interpolation = getattr(transforms.InterpolationMode, args.image_interpolation_mode.upper(), None)
+
+    # Raise an error if the interpolation method is invalid
+    if interpolation is None:
+        raise ValueError(f"Unsupported interpolation mode {args.image_interpolation_mode}.")
+
+    # Data preprocessing transformations
     train_transforms = transforms.Compose(
         [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Resize(args.resolution, interpolation=interpolation),  # Use dynamic interpolation method
             transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
             transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
             transforms.ToTensor(),
@@ -644,17 +709,22 @@ def main():
     )
 
     # Scheduler and math around the number of training steps.
-    overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    # Check the PR https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
+    num_warmup_steps_for_scheduler = args.lr_warmup_steps * accelerator.num_processes
     if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
+        len_train_dataloader_after_sharding = math.ceil(len(train_dataloader) / accelerator.num_processes)
+        num_update_steps_per_epoch = math.ceil(len_train_dataloader_after_sharding / args.gradient_accumulation_steps)
+        num_training_steps_for_scheduler = (
+            args.num_train_epochs * num_update_steps_per_epoch * accelerator.num_processes
+        )
+    else:
+        num_training_steps_for_scheduler = args.max_train_steps * accelerator.num_processes
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_warmup_steps=num_warmup_steps_for_scheduler,
+        num_training_steps=num_training_steps_for_scheduler,
     )
 
     # Prepare everything with our `accelerator`.
@@ -664,8 +734,14 @@ def main():
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if overrode_max_train_steps:
+    if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        if num_training_steps_for_scheduler != args.max_train_steps * accelerator.num_processes:
+            logger.warning(
+                f"The length of the 'train_dataloader' after 'accelerator.prepare' ({len(train_dataloader)}) does not match "
+                f"the expected length ({len_train_dataloader_after_sharding}) when the learning rate scheduler was created. "
+                f"This inconsistency may result in the learning rate scheduler not functioning properly."
+            )
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
@@ -769,7 +845,7 @@ def main():
                 if args.snr_gamma is None:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 else:
-                    # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
+                    # Compute loss-weights as per Section 3.4 of https://huggingface.co/papers/2303.09556.
                     # Since we predict the noise instead of x_0, the original formulation is slightly changed.
                     # This is discussed in Section 4.2 of the same paper.
                     snr = compute_snr(noise_scheduler, timesteps)
@@ -851,10 +927,6 @@ def main():
 
         if accelerator.is_main_process:
             if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
-                logger.info(
-                    f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-                    f" {args.validation_prompt}."
-                )
                 # create pipeline
                 pipeline = DiffusionPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
@@ -863,33 +935,7 @@ def main():
                     variant=args.variant,
                     torch_dtype=weight_dtype,
                 )
-                pipeline = pipeline.to(accelerator.device)
-                pipeline.set_progress_bar_config(disable=True)
-
-                # run inference
-                generator = torch.Generator(device=accelerator.device)
-                if args.seed is not None:
-                    generator = generator.manual_seed(args.seed)
-                images = []
-                with torch.cuda.amp.autocast():
-                    for _ in range(args.num_validation_images):
-                        images.append(
-                            pipeline(args.validation_prompt, num_inference_steps=30, generator=generator).images[0]
-                        )
-
-                for tracker in accelerator.trackers:
-                    if tracker.name == "tensorboard":
-                        np_images = np.stack([np.asarray(img) for img in images])
-                        tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
-                    if tracker.name == "wandb":
-                        tracker.log(
-                            {
-                                "validation": [
-                                    wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
-                                    for i, image in enumerate(images)
-                                ]
-                            }
-                        )
+                images = log_validation(pipeline, args, accelerator, epoch)
 
                 del pipeline
                 torch.cuda.empty_cache()
@@ -907,6 +953,22 @@ def main():
             safe_serialization=True,
         )
 
+        # Final inference
+        # Load previous pipeline
+        if args.validation_prompt is not None:
+            pipeline = DiffusionPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                revision=args.revision,
+                variant=args.variant,
+                torch_dtype=weight_dtype,
+            )
+
+            # load attention processors
+            pipeline.load_lora_weights(args.output_dir)
+
+            # run inference
+            images = log_validation(pipeline, args, accelerator, epoch, is_final_validation=True)
+
         if args.push_to_hub:
             save_model_card(
                 repo_id,
@@ -921,46 +983,6 @@ def main():
                 commit_message="End of training",
                 ignore_patterns=["step_*", "epoch_*"],
             )
-
-        # Final inference
-        # Load previous pipeline
-        if args.validation_prompt is not None:
-            pipeline = DiffusionPipeline.from_pretrained(
-                args.pretrained_model_name_or_path,
-                revision=args.revision,
-                variant=args.variant,
-                torch_dtype=weight_dtype,
-            )
-            pipeline = pipeline.to(accelerator.device)
-
-            # load attention processors
-            pipeline.load_lora_weights(args.output_dir)
-
-            # run inference
-            generator = torch.Generator(device=accelerator.device)
-            if args.seed is not None:
-                generator = generator.manual_seed(args.seed)
-            images = []
-            with torch.cuda.amp.autocast():
-                for _ in range(args.num_validation_images):
-                    images.append(
-                        pipeline(args.validation_prompt, num_inference_steps=30, generator=generator).images[0]
-                    )
-
-            for tracker in accelerator.trackers:
-                if len(images) != 0:
-                    if tracker.name == "tensorboard":
-                        np_images = np.stack([np.asarray(img) for img in images])
-                        tracker.writer.add_images("test", np_images, epoch, dataformats="NHWC")
-                    if tracker.name == "wandb":
-                        tracker.log(
-                            {
-                                "test": [
-                                    wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
-                                    for i, image in enumerate(images)
-                                ]
-                            }
-                        )
 
     accelerator.end_training()
 

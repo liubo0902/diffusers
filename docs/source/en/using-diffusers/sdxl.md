@@ -63,11 +63,12 @@ from diffusers import StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipelin
 import torch
 
 pipeline = StableDiffusionXLPipeline.from_single_file(
-    "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/sd_xl_base_1.0.safetensors", torch_dtype=torch.float16, variant="fp16", use_safetensors=True
+    "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/sd_xl_base_1.0.safetensors",
+    torch_dtype=torch.float16
 ).to("cuda")
 
 refiner = StableDiffusionXLImg2ImgPipeline.from_single_file(
-    "https://huggingface.co/stabilityai/stable-diffusion-xl-refiner-1.0/blob/main/sd_xl_refiner_1.0.safetensors", torch_dtype=torch.float16, use_safetensors=True, variant="fp16"
+    "https://huggingface.co/stabilityai/stable-diffusion-xl-refiner-1.0/blob/main/sd_xl_refiner_1.0.safetensors", torch_dtype=torch.float16
 ).to("cuda")
 ```
 
@@ -283,6 +284,12 @@ refiner = DiffusionPipeline.from_pretrained(
     variant="fp16",
 ).to("cuda")
 ```
+
+<Tip warning={true}>
+
+You can use SDXL refiner with a different base model. For example, you can use the [Hunyuan-DiT](../../api/pipelines/hunyuandit) or [PixArt-Sigma](../../api/pipelines/pixart_sigma) pipelines to generate images with better prompt adherence. Once you have generated an image, you can pass it to the SDXL refiner model to enhance final generation quality.
+
+</Tip>
 
 Generate an image from the base model, and set the model output to **latent** space:
 

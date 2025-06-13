@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
+# limitations under the License.
 
 import argparse
 import logging
@@ -19,6 +20,7 @@ import math
 import os
 import random
 import shutil
+from contextlib import nullcontext
 from pathlib import Path
 
 import accelerate
@@ -43,7 +45,7 @@ from transformers.utils import ContextManagers
 import diffusers
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
-from diffusers.training_utils import EMAModel, compute_snr
+from diffusers.training_utils import EMAModel, compute_dream_and_update_latents, compute_snr
 from diffusers.utils import check_min_version, deprecate, is_wandb_available, make_image_grid
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.import_utils import is_xformers_available
@@ -55,12 +57,12 @@ if is_wandb_available():
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.27.0.dev0")
+check_min_version("0.34.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
 DATASET_NAME_MAPPING = {
-    "lambdalabs/pokemon-blip-captions": ("image", "text"),
+    "lambdalabs/naruto-blip-captions": ("image", "text"),
 }
 
 
@@ -130,7 +132,7 @@ More information on all the CLI arguments and the environment are available on y
         inference=True,
     )
 
-    tags = ["stable-diffusion", "stable-diffusion-diffusers", "text-to-image", "diffusers"]
+    tags = ["stable-diffusion", "stable-diffusion-diffusers", "text-to-image", "diffusers", "diffusers-training"]
     model_card = populate_model_card(model_card, tags=tags)
 
     model_card.save(os.path.join(repo_folder, "README.md"))
@@ -163,7 +165,12 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     images = []
     for i in range(len(args.validation_prompts)):
-        with torch.autocast("cuda"):
+        if torch.backends.mps.is_available():
+            autocast_ctx = nullcontext()
+        else:
+            autocast_ctx = torch.autocast(accelerator.device.type)
+
+        with autocast_ctx:
             image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
 
         images.append(image)
@@ -182,7 +189,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
                 }
             )
         else:
-            logger.warn(f"image logging not implemented for {tracker.name}")
+            logger.warning(f"image logging not implemented for {tracker.name}")
 
     del pipeline
     torch.cuda.empty_cache()
@@ -352,7 +359,21 @@ def parse_args():
         type=float,
         default=None,
         help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
-        "More details here: https://arxiv.org/abs/2303.09556.",
+        "More details here: https://huggingface.co/papers/2303.09556.",
+    )
+    parser.add_argument(
+        "--dream_training",
+        action="store_true",
+        help=(
+            "Use the DREAM training method, which makes training more efficient and accurate at the "
+            "expense of doing an extra forward pass. See: https://huggingface.co/papers/2312.00210"
+        ),
+    )
+    parser.add_argument(
+        "--dream_detail_preservation",
+        type=float,
+        default=1.0,
+        help="Dream detail preservation factor p (should be greater than 0; default=1.0, as suggested in the paper)",
     )
     parser.add_argument(
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
@@ -366,6 +387,8 @@ def parse_args():
         ),
     )
     parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
+    parser.add_argument("--offload_ema", action="store_true", help="Offload EMA model to CPU during training step.")
+    parser.add_argument("--foreach_ema", action="store_true", help="Use faster foreach implementation of EMAModel.")
     parser.add_argument(
         "--non_ema_revision",
         type=str,
@@ -395,7 +418,7 @@ def parse_args():
         "--prediction_type",
         type=str,
         default=None,
-        help="The prediction_type that shall be used for training. Choose between 'epsilon' or 'v_prediction' or leave `None`. If left to `None` the default prediction type of the scheduler: `noise_scheduler.config.prediciton_type` is chosen.",
+        help="The prediction_type that shall be used for training. Choose between 'epsilon' or 'v_prediction' or leave `None`. If left to `None` the default prediction type of the scheduler: `noise_scheduler.config.prediction_type` is chosen.",
     )
     parser.add_argument(
         "--hub_model_id",
@@ -476,6 +499,15 @@ def parse_args():
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
         ),
     )
+    parser.add_argument(
+        "--image_interpolation_mode",
+        type=str,
+        default="lanczos",
+        choices=[
+            f.lower() for f in dir(transforms.InterpolationMode) if not f.startswith("__") and not f.endswith("__")
+        ],
+        help="The image interpolation method to use for resizing images.",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -521,6 +553,10 @@ def main():
         log_with=args.report_to,
         project_config=accelerator_project_config,
     )
+
+    # Disable AMP for MPS.
+    if torch.backends.mps.is_available():
+        accelerator.native_amp = False
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -599,7 +635,12 @@ def main():
         ema_unet = UNet2DConditionModel.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
         )
-        ema_unet = EMAModel(ema_unet.parameters(), model_cls=UNet2DConditionModel, model_config=ema_unet.config)
+        ema_unet = EMAModel(
+            ema_unet.parameters(),
+            model_cls=UNet2DConditionModel,
+            model_config=ema_unet.config,
+            foreach=args.foreach_ema,
+        )
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -607,7 +648,7 @@ def main():
 
             xformers_version = version.parse(xformers.__version__)
             if xformers_version == version.parse("0.0.16"):
-                logger.warn(
+                logger.warning(
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
@@ -630,12 +671,17 @@ def main():
 
         def load_model_hook(models, input_dir):
             if args.use_ema:
-                load_model = EMAModel.from_pretrained(os.path.join(input_dir, "unet_ema"), UNet2DConditionModel)
+                load_model = EMAModel.from_pretrained(
+                    os.path.join(input_dir, "unet_ema"), UNet2DConditionModel, foreach=args.foreach_ema
+                )
                 ema_unet.load_state_dict(load_model.state_dict())
-                ema_unet.to(accelerator.device)
+                if args.offload_ema:
+                    ema_unet.pin_memory()
+                else:
+                    ema_unet.to(accelerator.device)
                 del load_model
 
-            for i in range(len(models)):
+            for _ in range(len(models)):
                 # pop models so that they are not loaded again
                 model = models.pop()
 
@@ -750,10 +796,17 @@ def main():
         )
         return inputs.input_ids
 
-    # Preprocessing the datasets.
+    # Get the specified interpolation method from the args
+    interpolation = getattr(transforms.InterpolationMode, args.image_interpolation_mode.upper(), None)
+
+    # Raise an error if the interpolation method is invalid
+    if interpolation is None:
+        raise ValueError(f"Unsupported interpolation mode {args.image_interpolation_mode}.")
+
+    # Data preprocessing transformations
     train_transforms = transforms.Compose(
         [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Resize(args.resolution, interpolation=interpolation),  # Use dynamic interpolation method
             transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
             transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
             transforms.ToTensor(),
@@ -789,17 +842,22 @@ def main():
     )
 
     # Scheduler and math around the number of training steps.
-    overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    # Check the PR https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
+    num_warmup_steps_for_scheduler = args.lr_warmup_steps * accelerator.num_processes
     if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
+        len_train_dataloader_after_sharding = math.ceil(len(train_dataloader) / accelerator.num_processes)
+        num_update_steps_per_epoch = math.ceil(len_train_dataloader_after_sharding / args.gradient_accumulation_steps)
+        num_training_steps_for_scheduler = (
+            args.num_train_epochs * num_update_steps_per_epoch * accelerator.num_processes
+        )
+    else:
+        num_training_steps_for_scheduler = args.max_train_steps * accelerator.num_processes
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_warmup_steps=num_warmup_steps_for_scheduler,
+        num_training_steps=num_training_steps_for_scheduler,
     )
 
     # Prepare everything with our `accelerator`.
@@ -808,9 +866,12 @@ def main():
     )
 
     if args.use_ema:
-        ema_unet.to(accelerator.device)
+        if args.offload_ema:
+            ema_unet.pin_memory()
+        else:
+            ema_unet.to(accelerator.device)
 
-    # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
+    # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -826,8 +887,14 @@ def main():
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if overrode_max_train_steps:
+    if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        if num_training_steps_for_scheduler != args.max_train_steps * accelerator.num_processes:
+            logger.warning(
+                f"The length of the 'train_dataloader' after 'accelerator.prepare' ({len(train_dataloader)}) does not match "
+                f"the expected length ({len_train_dataloader_after_sharding}) when the learning rate scheduler was created. "
+                f"This inconsistency may result in the learning rate scheduler not functioning properly."
+            )
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
@@ -937,13 +1004,25 @@ def main():
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
+                if args.dream_training:
+                    noisy_latents, target = compute_dream_and_update_latents(
+                        unet,
+                        noise_scheduler,
+                        timesteps,
+                        noise,
+                        noisy_latents,
+                        target,
+                        encoder_hidden_states,
+                        args.dream_detail_preservation,
+                    )
+
                 # Predict the noise residual and compute loss
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
 
                 if args.snr_gamma is None:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 else:
-                    # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
+                    # Compute loss-weights as per Section 3.4 of https://huggingface.co/papers/2303.09556.
                     # Since we predict the noise instead of x_0, the original formulation is slightly changed.
                     # This is discussed in Section 4.2 of the same paper.
                     snr = compute_snr(noise_scheduler, timesteps)
@@ -974,7 +1053,11 @@ def main():
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 if args.use_ema:
+                    if args.offload_ema:
+                        ema_unet.to(device="cuda", non_blocking=True)
                     ema_unet.step(unet.parameters())
+                    if args.offload_ema:
+                        ema_unet.to(device="cpu", non_blocking=True)
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)

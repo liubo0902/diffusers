@@ -18,6 +18,7 @@ from diffusers import (
     PNDMScheduler,
     UNet2DConditionModel,
 )
+from diffusers.pipelines.pipeline_utils import StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.utils import logging
@@ -26,7 +27,7 @@ from diffusers.utils import logging
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-class SpeechToImagePipeline(DiffusionPipeline):
+class SpeechToImagePipeline(DiffusionPipeline, StableDiffusionMixin):
     def __init__(
         self,
         speech_model: WhisperForConditionalGeneration,
@@ -62,14 +63,6 @@ class SpeechToImagePipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
 
-    def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
-        if slice_size == "auto":
-            slice_size = self.unet.config.attention_head_dim // 2
-        self.unet.set_attention_slice(slice_size)
-
-    def disable_attention_slicing(self):
-        self.enable_attention_slicing(None)
-
     @torch.no_grad()
     def __call__(
         self,
@@ -83,10 +76,10 @@ class SpeechToImagePipeline(DiffusionPipeline):
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[torch.Generator] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
         callback_steps: int = 1,
         **kwargs,
     ):
@@ -141,7 +134,7 @@ class SpeechToImagePipeline(DiffusionPipeline):
         text_embeddings = text_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+        # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
         # get unconditional embeddings for classifier free guidance
@@ -217,7 +210,7 @@ class SpeechToImagePipeline(DiffusionPipeline):
 
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
+        # eta corresponds to η in DDIM paper: https://huggingface.co/papers/2010.02502
         # and should be between [0, 1]
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
         extra_step_kwargs = {}

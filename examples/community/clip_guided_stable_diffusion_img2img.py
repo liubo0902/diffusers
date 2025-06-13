@@ -7,17 +7,17 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torchvision import transforms
-from transformers import CLIPFeatureExtractor, CLIPModel, CLIPTextModel, CLIPTokenizer
+from transformers import CLIPImageProcessor, CLIPModel, CLIPTextModel, CLIPTokenizer
 
 from diffusers import (
     AutoencoderKL,
     DDIMScheduler,
-    DiffusionPipeline,
     DPMSolverMultistepScheduler,
     LMSDiscreteScheduler,
     PNDMScheduler,
     UNet2DConditionModel,
 )
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.utils import PIL_INTERPOLATION, deprecate
 from diffusers.utils.torch_utils import randn_tensor
@@ -25,16 +25,16 @@ from diffusers.utils.torch_utils import randn_tensor
 
 EXAMPLE_DOC_STRING = """
     Examples:
-        ```
+        ```py
         from io import BytesIO
 
         import requests
         import torch
         from diffusers import DiffusionPipeline
         from PIL import Image
-        from transformers import CLIPFeatureExtractor, CLIPModel
+        from transformers import CLIPImageProcessor, CLIPModel
 
-        feature_extractor = CLIPFeatureExtractor.from_pretrained(
+        feature_extractor = CLIPImageProcessor.from_pretrained(
             "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
         )
         clip_model = CLIPModel.from_pretrained(
@@ -125,7 +125,7 @@ def set_requires_grad(model, value):
         param.requires_grad = value
 
 
-class CLIPGuidedStableDiffusion(DiffusionPipeline):
+class CLIPGuidedStableDiffusion(DiffusionPipeline, StableDiffusionMixin):
     """CLIP guided stable diffusion based on the amazing repo by @crowsonkb and @Jack000
     - https://github.com/Jack000/glid-3-xl
     - https://github.dev/crowsonkb/k-diffusion
@@ -139,7 +139,7 @@ class CLIPGuidedStableDiffusion(DiffusionPipeline):
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
         scheduler: Union[PNDMScheduler, LMSDiscreteScheduler, DDIMScheduler, DPMSolverMultistepScheduler],
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
     ):
         super().__init__()
         self.register_modules(
@@ -162,16 +162,6 @@ class CLIPGuidedStableDiffusion(DiffusionPipeline):
 
         set_requires_grad(self.text_encoder, False)
         set_requires_grad(self.clip_model, False)
-
-    def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
-        if slice_size == "auto":
-            # half the attention head size is usually a good trade-off between
-            # speed and memory
-            slice_size = self.unet.config.attention_head_dim // 2
-        self.unet.set_attention_slice(slice_size)
-
-    def disable_attention_slicing(self):
-        self.enable_attention_slicing(None)
 
     def freeze_vae(self):
         set_requires_grad(self.vae, False)
@@ -270,7 +260,7 @@ class CLIPGuidedStableDiffusion(DiffusionPipeline):
             alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
             beta_prod_t = 1 - alpha_prod_t
             # compute predicted original sample from predicted noise also called
-            # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+            # "predicted x_0" of formula (12) from https://huggingface.co/papers/2010.02502
             pred_original_sample = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
 
             fac = torch.sqrt(beta_prod_t)
@@ -316,7 +306,7 @@ class CLIPGuidedStableDiffusion(DiffusionPipeline):
         prompt: Union[str, List[str]],
         height: Optional[int] = 512,
         width: Optional[int] = 512,
-        image: Union[torch.FloatTensor, PIL.Image.Image] = None,
+        image: Union[torch.Tensor, PIL.Image.Image] = None,
         strength: float = 0.8,
         num_inference_steps: Optional[int] = 50,
         guidance_scale: Optional[float] = 7.5,
@@ -327,7 +317,7 @@ class CLIPGuidedStableDiffusion(DiffusionPipeline):
         num_cutouts: Optional[int] = 4,
         use_cutouts: Optional[bool] = True,
         generator: Optional[torch.Generator] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
     ):
@@ -369,9 +359,16 @@ class CLIPGuidedStableDiffusion(DiffusionPipeline):
 
         # Preprocess image
         image = preprocess(image, width, height)
-        latents = self.prepare_latents(
-            image, latent_timestep, batch_size, num_images_per_prompt, text_embeddings.dtype, self.device, generator
-        )
+        if latents is None:
+            latents = self.prepare_latents(
+                image,
+                latent_timestep,
+                batch_size,
+                num_images_per_prompt,
+                text_embeddings.dtype,
+                self.device,
+                generator,
+            )
 
         if clip_guidance_scale > 0:
             if clip_prompt is not None:
@@ -390,7 +387,7 @@ class CLIPGuidedStableDiffusion(DiffusionPipeline):
             text_embeddings_clip = text_embeddings_clip.repeat_interleave(num_images_per_prompt, dim=0)
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+        # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
         # get unconditional embeddings for classifier free guidance
@@ -431,7 +428,7 @@ class CLIPGuidedStableDiffusion(DiffusionPipeline):
 
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
+        # eta corresponds to η in DDIM paper: https://huggingface.co/papers/2010.02502
         # and should be between [0, 1]
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
         extra_step_kwargs = {}

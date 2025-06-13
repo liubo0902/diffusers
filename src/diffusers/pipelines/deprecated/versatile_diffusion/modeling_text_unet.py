@@ -34,7 +34,7 @@ from ....models.resnet import ResnetBlockCondNorm2D
 from ....models.transformers.dual_transformer_2d import DualTransformer2DModel
 from ....models.transformers.transformer_2d import Transformer2DModel
 from ....models.unets.unet_2d_condition import UNet2DConditionOutput
-from ....utils import USE_PEFT_BACKEND, is_torch_version, logging, scale_lora_layers, unscale_lora_layers
+from ....utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
 from ....utils.torch_utils import apply_freeu
 
 
@@ -268,7 +268,6 @@ class GLIGENTextBoundingboxProjection(nn.Module):
         return objs
 
 
-# Copied from diffusers.models.unets.unet_2d_condition.UNet2DConditionModel with UNet2DConditionModel->UNetFlatConditionModel, nn.Conv2d->LinearMultiDim, Block2D->BlockFlat
 class UNetFlatConditionModel(ModelMixin, ConfigMixin):
     r"""
     A conditional 2D UNet model that takes a noisy sample, conditional state, and a timestep and returns a sample
@@ -364,6 +363,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
     """
 
     _supports_gradient_checkpointing = True
+    _no_split_modules = ["BasicTransformerBlock", "ResnetBlockFlat", "CrossAttnUpBlockFlat"]
 
     @register_to_config
     def __init__(
@@ -532,7 +532,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
         elif encoder_hid_dim_type == "text_image_proj":
             # image_embed_dim DOESN'T have to be `cross_attention_dim`. To not clutter the __init__ too much
             # they are set to `cross_attention_dim` here as this is exactly the required dimension for the currently only use
-            # case when `addition_embed_type == "text_image_proj"` (Kadinsky 2.1)`
+            # case when `addition_embed_type == "text_image_proj"` (Kandinsky 2.1)`
             self.encoder_hid_proj = TextImageProjection(
                 text_embed_dim=encoder_hid_dim,
                 image_embed_dim=cross_attention_dim,
@@ -546,7 +546,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
             )
         elif encoder_hid_dim_type is not None:
             raise ValueError(
-                f"encoder_hid_dim_type: {encoder_hid_dim_type} must be None, 'text_proj' or 'text_image_proj'."
+                f"`encoder_hid_dim_type`: {encoder_hid_dim_type} must be None, 'text_proj', 'text_image_proj' or 'image_proj'."
             )
         else:
             self.encoder_hid_proj = None
@@ -592,7 +592,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
         elif addition_embed_type == "text_image":
             # text_embed_dim and image_embed_dim DON'T have to be `cross_attention_dim`. To not clutter the __init__ too much
             # they are set to `cross_attention_dim` here as this is exactly the required dimension for the currently only use
-            # case when `addition_embed_type == "text_image"` (Kadinsky 2.1)`
+            # case when `addition_embed_type == "text_image"` (Kandinsky 2.1)`
             self.add_embedding = TextImageTimeEmbedding(
                 text_embed_dim=cross_attention_dim, image_embed_dim=cross_attention_dim, time_embed_dim=time_embed_dim
             )
@@ -817,7 +817,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
             positive_len = 768
             if isinstance(cross_attention_dim, int):
                 positive_len = cross_attention_dim
-            elif isinstance(cross_attention_dim, tuple) or isinstance(cross_attention_dim, list):
+            elif isinstance(cross_attention_dim, (list, tuple)):
                 positive_len = cross_attention_dim[0]
 
             feature_type = "text-only" if attention_type == "gated" else "text-image"
@@ -837,7 +837,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
 
         def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttentionProcessor]):
             if hasattr(module, "get_processor"):
-                processors[f"{name}.processor"] = module.get_processor(return_deprecated_lora=True)
+                processors[f"{name}.processor"] = module.get_processor()
 
             for sub_name, child in module.named_children():
                 fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
@@ -963,12 +963,8 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
         for module in self.children():
             fn_recursive_set_attention_slice(module, reversed_slice_size)
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        if hasattr(module, "gradient_checkpointing"):
-            module.gradient_checkpointing = value
-
     def enable_freeu(self, s1, s2, b1, b2):
-        r"""Enables the FreeU mechanism from https://arxiv.org/abs/2309.11497.
+        r"""Enables the FreeU mechanism from https://huggingface.co/papers/2309.11497.
 
         The suffixes after the scaling factors represent the stage blocks where they are being applied.
 
@@ -1001,8 +997,8 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
 
     def fuse_qkv_projections(self):
         """
-        Enables fused QKV projections. For self-attention modules, all projection matrices (i.e., query,
-        key, value) are fused. For cross-attention modules, key and value projection matrices are fused.
+        Enables fused QKV projections. For self-attention modules, all projection matrices (i.e., query, key, value)
+        are fused. For cross-attention modules, key and value projection matrices are fused.
 
         <Tip warning={true}>
 
@@ -1048,7 +1044,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
 
     def forward(
         self,
-        sample: torch.FloatTensor,
+        sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
         class_labels: Optional[torch.Tensor] = None,
@@ -1066,10 +1062,10 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
         The [`UNetFlatConditionModel`] forward method.
 
         Args:
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 The noisy input tensor with the following shape `(batch, channel, height, width)`.
-            timestep (`torch.FloatTensor` or `float` or `int`): The number of timesteps to denoise an input.
-            encoder_hidden_states (`torch.FloatTensor`):
+            timestep (`torch.Tensor` or `float` or `int`): The number of timesteps to denoise an input.
+            encoder_hidden_states (`torch.Tensor`):
                 The encoder hidden states with shape `(batch, sequence_length, feature_dim)`.
             class_labels (`torch.Tensor`, *optional*, defaults to `None`):
                 Optional class labels for conditioning. Their embeddings will be summed with the timestep embeddings.
@@ -1101,7 +1097,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
             cross_attention_kwargs (`dict`, *optional*):
                 A kwargs dictionary that if specified is passed along to the [`AttnProcessor`].
             added_cond_kwargs: (`dict`, *optional*):
-                A kwargs dictionary containin additional embeddings that if specified are added to the embeddings that
+                A kwargs dictionary containing additional embeddings that if specified are added to the embeddings that
                 are passed along to the UNet blocks.
             down_block_additional_residuals (`tuple` of `torch.Tensor`, *optional*):
                 additional residuals to be added to UNet long skip connections from down blocks to up blocks for
@@ -1113,8 +1109,8 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
 
         Returns:
             [`~models.unets.unet_2d_condition.UNet2DConditionOutput`] or `tuple`:
-                If `return_dict` is True, an [`~models.unets.unet_2d_condition.UNet2DConditionOutput`] is returned, otherwise
-                a `tuple` is returned where the first element is the sample tensor.
+                If `return_dict` is True, an [`~models.unets.unet_2d_condition.UNet2DConditionOutput`] is returned,
+                otherwise a `tuple` is returned where the first element is the sample tensor.
         """
         # By default samples have to be AT least a multiple of the overall upsampling factor.
         # The overall upsampling factor is equal to 2 ** (# num of upsampling layers).
@@ -1163,10 +1159,11 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
             # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
             # This would be a good case for the `match` statement (Python 3.10+)
             is_mps = sample.device.type == "mps"
+            is_npu = sample.device.type == "npu"
             if isinstance(timestep, float):
-                dtype = torch.float32 if is_mps else torch.float64
+                dtype = torch.float32 if (is_mps or is_npu) else torch.float64
             else:
-                dtype = torch.int32 if is_mps else torch.int64
+                dtype = torch.int32 if (is_mps or is_npu) else torch.int64
             timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
         elif len(timesteps.shape) == 0:
             timesteps = timesteps[None].to(sample.device)
@@ -1258,7 +1255,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
         if self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "text_proj":
             encoder_hidden_states = self.encoder_hid_proj(encoder_hidden_states)
         elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "text_image_proj":
-            # Kadinsky 2.1 - style
+            # Kandinsky 2.1 - style
             if "image_embeds" not in added_cond_kwargs:
                 raise ValueError(
                     f"{self.__class__} has the config param `encoder_hid_dim_type` set to 'text_image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
@@ -1334,7 +1331,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
                     **additional_residuals,
                 )
             else:
-                sample, res_samples = downsample_block(hidden_states=sample, temb=emb, scale=lora_scale)
+                sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
                 if is_adapter and len(down_intrablock_additional_residuals) > 0:
                     sample += down_intrablock_additional_residuals.pop(0)
 
@@ -1590,35 +1587,21 @@ class DownBlockFlat(nn.Module):
         self.gradient_checkpointing = False
 
     def forward(
-        self, hidden_states: torch.FloatTensor, temb: Optional[torch.FloatTensor] = None, scale: float = 1.0
-    ) -> Tuple[torch.FloatTensor, Tuple[torch.FloatTensor, ...]]:
+        self, hidden_states: torch.Tensor, temb: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         output_states = ()
 
         for resnet in self.resnets:
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        return module(*inputs)
-
-                    return custom_forward
-
-                if is_torch_version(">=", "1.11.0"):
-                    hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(resnet), hidden_states, temb, use_reentrant=False
-                    )
-                else:
-                    hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(resnet), hidden_states, temb
-                    )
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb)
             else:
-                hidden_states = resnet(hidden_states, temb, scale=scale)
+                hidden_states = resnet(hidden_states, temb)
 
             output_states = output_states + (hidden_states,)
 
         if self.downsamplers is not None:
             for downsampler in self.downsamplers:
-                hidden_states = downsampler(hidden_states, scale=scale)
+                hidden_states = downsampler(hidden_states)
 
             output_states = output_states + (hidden_states,)
 
@@ -1719,39 +1702,21 @@ class CrossAttnDownBlockFlat(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        temb: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
+        hidden_states: torch.Tensor,
+        temb: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-        additional_residuals: Optional[torch.FloatTensor] = None,
-    ) -> Tuple[torch.FloatTensor, Tuple[torch.FloatTensor, ...]]:
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        additional_residuals: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         output_states = ()
-
-        lora_scale = cross_attention_kwargs.get("scale", 1.0) if cross_attention_kwargs is not None else 1.0
 
         blocks = list(zip(self.resnets, self.attentions))
 
         for i, (resnet, attn) in enumerate(blocks):
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(resnet),
-                    hidden_states,
-                    temb,
-                    **ckpt_kwargs,
-                )
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb)
                 hidden_states = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
@@ -1761,7 +1726,7 @@ class CrossAttnDownBlockFlat(nn.Module):
                     return_dict=False,
                 )[0]
             else:
-                hidden_states = resnet(hidden_states, temb, scale=lora_scale)
+                hidden_states = resnet(hidden_states, temb)
                 hidden_states = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
@@ -1779,7 +1744,7 @@ class CrossAttnDownBlockFlat(nn.Module):
 
         if self.downsamplers is not None:
             for downsampler in self.downsamplers:
-                hidden_states = downsampler(hidden_states, scale=lora_scale)
+                hidden_states = downsampler(hidden_states)
 
             output_states = output_states + (hidden_states,)
 
@@ -1839,12 +1804,17 @@ class UpBlockFlat(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        res_hidden_states_tuple: Tuple[torch.FloatTensor, ...],
-        temb: Optional[torch.FloatTensor] = None,
+        hidden_states: torch.Tensor,
+        res_hidden_states_tuple: Tuple[torch.Tensor, ...],
+        temb: Optional[torch.Tensor] = None,
         upsample_size: Optional[int] = None,
-        scale: float = 1.0,
-    ) -> torch.FloatTensor:
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        if len(args) > 0 or kwargs.get("scale", None) is not None:
+            deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
+            deprecate("scale", "1.0.0", deprecation_message)
+
         is_freeu_enabled = (
             getattr(self, "s1", None)
             and getattr(self, "s2", None)
@@ -1871,28 +1841,14 @@ class UpBlockFlat(nn.Module):
 
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
 
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        return module(*inputs)
-
-                    return custom_forward
-
-                if is_torch_version(">=", "1.11.0"):
-                    hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(resnet), hidden_states, temb, use_reentrant=False
-                    )
-                else:
-                    hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(resnet), hidden_states, temb
-                    )
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb)
             else:
-                hidden_states = resnet(hidden_states, temb, scale=scale)
+                hidden_states = resnet(hidden_states, temb)
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
-                hidden_states = upsampler(hidden_states, upsample_size, scale=scale)
+                hidden_states = upsampler(hidden_states, upsample_size)
 
         return hidden_states
 
@@ -1991,16 +1947,19 @@ class CrossAttnUpBlockFlat(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        res_hidden_states_tuple: Tuple[torch.FloatTensor, ...],
-        temb: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        hidden_states: torch.Tensor,
+        res_hidden_states_tuple: Tuple[torch.Tensor, ...],
+        temb: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         upsample_size: Optional[int] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-    ) -> torch.FloatTensor:
-        lora_scale = cross_attention_kwargs.get("scale", 1.0) if cross_attention_kwargs is not None else 1.0
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if cross_attention_kwargs is not None:
+            if cross_attention_kwargs.get("scale", None) is not None:
+                logger.warning("Passing `scale` to `cross_attention_kwargs` is deprecated. `scale` will be ignored.")
+
         is_freeu_enabled = (
             getattr(self, "s1", None)
             and getattr(self, "s2", None)
@@ -2027,24 +1986,8 @@ class CrossAttnUpBlockFlat(nn.Module):
 
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
 
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(resnet),
-                    hidden_states,
-                    temb,
-                    **ckpt_kwargs,
-                )
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb)
                 hidden_states = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
@@ -2054,7 +1997,7 @@ class CrossAttnUpBlockFlat(nn.Module):
                     return_dict=False,
                 )[0]
             else:
-                hidden_states = resnet(hidden_states, temb, scale=lora_scale)
+                hidden_states = resnet(hidden_states, temb)
                 hidden_states = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
@@ -2066,7 +2009,7 @@ class CrossAttnUpBlockFlat(nn.Module):
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
-                hidden_states = upsampler(hidden_states, upsample_size, scale=lora_scale)
+                hidden_states = upsampler(hidden_states, upsample_size)
 
         return hidden_states
 
@@ -2098,8 +2041,8 @@ class UNetMidBlockFlat(nn.Module):
         output_scale_factor (`float`, *optional*, defaults to 1.0): The output scale factor.
 
     Returns:
-        `torch.FloatTensor`: The output of the last residual block, which is a tensor of shape `(batch_size,
-        in_channels, height, width)`.
+        `torch.Tensor`: The output of the last residual block, which is a tensor of shape `(batch_size, in_channels,
+        height, width)`.
 
     """
 
@@ -2159,7 +2102,7 @@ class UNetMidBlockFlat(nn.Module):
         attentions = []
 
         if attention_head_dim is None:
-            logger.warn(
+            logger.warning(
                 f"It is not recommend to pass `attention_head_dim=None`. Defaulting `attention_head_dim` to `in_channels`: {in_channels}."
             )
             attention_head_dim = in_channels
@@ -2217,12 +2160,19 @@ class UNetMidBlockFlat(nn.Module):
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
-    def forward(self, hidden_states: torch.FloatTensor, temb: Optional[torch.FloatTensor] = None) -> torch.FloatTensor:
+        self.gradient_checkpointing = False
+
+    def forward(self, hidden_states: torch.Tensor, temb: Optional[torch.Tensor] = None) -> torch.Tensor:
         hidden_states = self.resnets[0](hidden_states, temb)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
-            if attn is not None:
-                hidden_states = attn(hidden_states, temb=temb)
-            hidden_states = resnet(hidden_states, temb)
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                if attn is not None:
+                    hidden_states = attn(hidden_states, temb=temb)
+                hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb)
+            else:
+                if attn is not None:
+                    hidden_states = attn(hidden_states, temb=temb)
+                hidden_states = resnet(hidden_states, temb)
 
         return hidden_states
 
@@ -2233,6 +2183,7 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
         self,
         in_channels: int,
         temb_channels: int,
+        out_channels: Optional[int] = None,
         dropout: float = 0.0,
         num_layers: int = 1,
         transformer_layers_per_block: Union[int, Tuple[int]] = 1,
@@ -2240,6 +2191,7 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
         resnet_time_scale_shift: str = "default",
         resnet_act_fn: str = "swish",
         resnet_groups: int = 32,
+        resnet_groups_out: Optional[int] = None,
         resnet_pre_norm: bool = True,
         num_attention_heads: int = 1,
         output_scale_factor: float = 1.0,
@@ -2251,6 +2203,10 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
     ):
         super().__init__()
 
+        out_channels = out_channels or in_channels
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+
         self.has_cross_attention = True
         self.num_attention_heads = num_attention_heads
         resnet_groups = resnet_groups if resnet_groups is not None else min(in_channels // 4, 32)
@@ -2259,14 +2215,17 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
         if isinstance(transformer_layers_per_block, int):
             transformer_layers_per_block = [transformer_layers_per_block] * num_layers
 
+        resnet_groups_out = resnet_groups_out or resnet_groups
+
         # there is always at least one resnet
         resnets = [
             ResnetBlockFlat(
                 in_channels=in_channels,
-                out_channels=in_channels,
+                out_channels=out_channels,
                 temb_channels=temb_channels,
                 eps=resnet_eps,
                 groups=resnet_groups,
+                groups_out=resnet_groups_out,
                 dropout=dropout,
                 time_embedding_norm=resnet_time_scale_shift,
                 non_linearity=resnet_act_fn,
@@ -2281,11 +2240,11 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
                 attentions.append(
                     Transformer2DModel(
                         num_attention_heads,
-                        in_channels // num_attention_heads,
-                        in_channels=in_channels,
+                        out_channels // num_attention_heads,
+                        in_channels=out_channels,
                         num_layers=transformer_layers_per_block[i],
                         cross_attention_dim=cross_attention_dim,
-                        norm_num_groups=resnet_groups,
+                        norm_num_groups=resnet_groups_out,
                         use_linear_projection=use_linear_projection,
                         upcast_attention=upcast_attention,
                         attention_type=attention_type,
@@ -2295,8 +2254,8 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
                 attentions.append(
                     DualTransformer2DModel(
                         num_attention_heads,
-                        in_channels // num_attention_heads,
-                        in_channels=in_channels,
+                        out_channels // num_attention_heads,
+                        in_channels=out_channels,
                         num_layers=1,
                         cross_attention_dim=cross_attention_dim,
                         norm_num_groups=resnet_groups,
@@ -2304,11 +2263,11 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
                 )
             resnets.append(
                 ResnetBlockFlat(
-                    in_channels=in_channels,
-                    out_channels=in_channels,
+                    in_channels=out_channels,
+                    out_channels=out_channels,
                     temb_channels=temb_channels,
                     eps=resnet_eps,
-                    groups=resnet_groups,
+                    groups=resnet_groups_out,
                     dropout=dropout,
                     time_embedding_norm=resnet_time_scale_shift,
                     non_linearity=resnet_act_fn,
@@ -2324,28 +2283,20 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        temb: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
+        hidden_states: torch.Tensor,
+        temb: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-    ) -> torch.FloatTensor:
-        lora_scale = cross_attention_kwargs.get("scale", 1.0) if cross_attention_kwargs is not None else 1.0
-        hidden_states = self.resnets[0](hidden_states, temb, scale=lora_scale)
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if cross_attention_kwargs is not None:
+            if cross_attention_kwargs.get("scale", None) is not None:
+                logger.warning("Passing `scale` to `cross_attention_kwargs` is deprecated. `scale` will be ignored.")
+
+        hidden_states = self.resnets[0](hidden_states, temb)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
@@ -2354,12 +2305,7 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
                     encoder_attention_mask=encoder_attention_mask,
                     return_dict=False,
                 )[0]
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(resnet),
-                    hidden_states,
-                    temb,
-                    **ckpt_kwargs,
-                )
+                hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb)
             else:
                 hidden_states = attn(
                     hidden_states,
@@ -2369,7 +2315,7 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
                     encoder_attention_mask=encoder_attention_mask,
                     return_dict=False,
                 )[0]
-                hidden_states = resnet(hidden_states, temb, scale=lora_scale)
+                hidden_states = resnet(hidden_states, temb)
 
         return hidden_states
 
@@ -2462,15 +2408,16 @@ class UNetMidBlockFlatSimpleCrossAttn(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        temb: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
+        hidden_states: torch.Tensor,
+        temb: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-    ) -> torch.FloatTensor:
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         cross_attention_kwargs = cross_attention_kwargs if cross_attention_kwargs is not None else {}
-        lora_scale = cross_attention_kwargs.get("scale", 1.0)
+        if cross_attention_kwargs.get("scale", None) is not None:
+            logger.warning("Passing `scale` to `cross_attention_kwargs` is deprecated. `scale` will be ignored.")
 
         if attention_mask is None:
             # if encoder_hidden_states is defined: we are doing cross-attn, so we should use cross-attn mask.
@@ -2483,7 +2430,7 @@ class UNetMidBlockFlatSimpleCrossAttn(nn.Module):
             #         mask = attention_mask if encoder_hidden_states is None else encoder_attention_mask
             mask = attention_mask
 
-        hidden_states = self.resnets[0](hidden_states, temb, scale=lora_scale)
+        hidden_states = self.resnets[0](hidden_states, temb)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
             # attn
             hidden_states = attn(
@@ -2494,6 +2441,6 @@ class UNetMidBlockFlatSimpleCrossAttn(nn.Module):
             )
 
             # resnet
-            hidden_states = resnet(hidden_states, temb, scale=lora_scale)
+            hidden_states = resnet(hidden_states, temb)
 
         return hidden_states

@@ -33,16 +33,16 @@ class DDPMSchedulerOutput(BaseOutput):
     Output class for the scheduler's `step` function output.
 
     Args:
-        prev_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
+        prev_sample (`torch.Tensor` of shape `(batch_size, num_channels, height, width)` for images):
             Computed sample `(x_{t-1})` of previous timestep. `prev_sample` should be used as next model input in the
             denoising loop.
-        pred_original_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
+        pred_original_sample (`torch.Tensor` of shape `(batch_size, num_channels, height, width)` for images):
             The predicted denoised sample `(x_{0})` based on the model output from the current timestep.
             `pred_original_sample` can be used to preview progress or for guidance.
     """
 
-    prev_sample: torch.FloatTensor
-    pred_original_sample: Optional[torch.FloatTensor] = None
+    prev_sample: torch.Tensor
+    pred_original_sample: Optional[torch.Tensor] = None
 
 
 def betas_for_alpha_bar(
@@ -79,7 +79,7 @@ def betas_for_alpha_bar(
             return math.exp(t * -12.0)
 
     else:
-        raise ValueError(f"Unsupported alpha_tranform_type: {alpha_transform_type}")
+        raise ValueError(f"Unsupported alpha_transform_type: {alpha_transform_type}")
 
     betas = []
     for i in range(num_diffusion_timesteps):
@@ -92,15 +92,15 @@ def betas_for_alpha_bar(
 # Copied from diffusers.schedulers.scheduling_ddim.rescale_zero_terminal_snr
 def rescale_zero_terminal_snr(betas):
     """
-    Rescales betas to have zero terminal SNR Based on https://arxiv.org/pdf/2305.08891.pdf (Algorithm 1)
+    Rescales betas to have zero terminal SNR Based on https://huggingface.co/papers/2305.08891 (Algorithm 1)
 
 
     Args:
-        betas (`torch.FloatTensor`):
+        betas (`torch.Tensor`):
             the betas that the scheduler is being initialized with.
 
     Returns:
-        `torch.FloatTensor`: rescaled betas with zero terminal SNR
+        `torch.Tensor`: rescaled betas with zero terminal SNR
     """
     # Convert betas to alphas_bar_sqrt
     alphas = 1.0 - betas
@@ -142,7 +142,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
             The final `beta` value.
         beta_schedule (`str`, defaults to `"linear"`):
             The beta schedule, a mapping from a beta range to a sequence of betas for stepping the model. Choose from
-            `linear`, `scaled_linear`, or `squaredcos_cap_v2`.
+            `linear`, `scaled_linear`, `squaredcos_cap_v2`, or `sigmoid`.
         trained_betas (`np.ndarray`, *optional*):
             An array of betas to pass directly to the constructor without using `beta_start` and `beta_end`.
         variance_type (`str`, defaults to `"fixed_small"`):
@@ -167,9 +167,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
             The way the timesteps should be scaled. Refer to Table 2 of the [Common Diffusion Noise Schedules and
             Sample Steps are Flawed](https://huggingface.co/papers/2305.08891) for more information.
         steps_offset (`int`, defaults to 0):
-            An offset added to the inference steps. You can use a combination of `offset=1` and
-            `set_alpha_to_one=False` to make the last step use step 0 for the previous alpha product like in Stable
-            Diffusion.
+            An offset added to the inference steps, as required by some model families.
         rescale_betas_zero_snr (`bool`, defaults to `False`):
             Whether to rescale the betas to have zero terminal SNR. This enables the model to generate very bright and
             dark samples instead of limiting it to samples with medium brightness. Loosely related to
@@ -196,7 +194,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         sample_max_value: float = 1.0,
         timestep_spacing: str = "leading",
         steps_offset: int = 0,
-        rescale_betas_zero_snr: int = False,
+        rescale_betas_zero_snr: bool = False,
     ):
         if trained_betas is not None:
             self.betas = torch.tensor(trained_betas, dtype=torch.float32)
@@ -213,7 +211,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
             betas = torch.linspace(-6, 6, num_train_timesteps)
             self.betas = torch.sigmoid(betas) * (beta_end - beta_start) + beta_start
         else:
-            raise NotImplementedError(f"{beta_schedule} does is not implemented for {self.__class__}")
+            raise NotImplementedError(f"{beta_schedule} is not implemented for {self.__class__}")
 
         # Rescale for zero SNR
         if rescale_betas_zero_snr:
@@ -233,19 +231,19 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
 
         self.variance_type = variance_type
 
-    def scale_model_input(self, sample: torch.FloatTensor, timestep: Optional[int] = None) -> torch.FloatTensor:
+    def scale_model_input(self, sample: torch.Tensor, timestep: Optional[int] = None) -> torch.Tensor:
         """
         Ensures interchangeability with schedulers that need to scale the denoising model input depending on the
         current timestep.
 
         Args:
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 The input sample.
             timestep (`int`, *optional*):
                 The current timestep in the diffusion chain.
 
         Returns:
-            `torch.FloatTensor`:
+            `torch.Tensor`:
                 A scaled input sample.
         """
         return sample
@@ -281,8 +279,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
 
             if timesteps[0] >= self.config.num_train_timesteps:
                 raise ValueError(
-                    f"`timesteps` must start before `self.config.train_timesteps`:"
-                    f" {self.config.num_train_timesteps}."
+                    f"`timesteps` must start before `self.config.train_timesteps`: {self.config.num_train_timesteps}."
                 )
 
             timesteps = np.array(timesteps, dtype=np.int64)
@@ -298,7 +295,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
             self.num_inference_steps = num_inference_steps
             self.custom_timesteps = False
 
-            # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://arxiv.org/abs/2305.08891
+            # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://huggingface.co/papers/2305.08891
             if self.config.timestep_spacing == "linspace":
                 timesteps = (
                     np.linspace(0, self.config.num_train_timesteps - 1, num_inference_steps)
@@ -332,7 +329,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         alpha_prod_t_prev = self.alphas_cumprod[prev_t] if prev_t >= 0 else self.one
         current_beta_t = 1 - alpha_prod_t / alpha_prod_t_prev
 
-        # For t > 0, compute predicted variance βt (see formula (6) and (7) from https://arxiv.org/pdf/2006.11239.pdf)
+        # For t > 0, compute predicted variance βt (see formula (6) and (7) from https://huggingface.co/papers/2006.11239)
         # and sample from it to get previous sample
         # x_{t-1} ~ N(pred_prev_sample, variance) == add variance to pred_sample
         variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t
@@ -346,7 +343,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         # hacks - were probably added for training stability
         if variance_type == "fixed_small":
             variance = variance
-        # for rl-diffuser https://arxiv.org/abs/2205.09991
+        # for rl-diffuser https://huggingface.co/papers/2205.09991
         elif variance_type == "fixed_small_log":
             variance = torch.log(variance)
             variance = torch.exp(0.5 * variance)
@@ -365,7 +362,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
 
         return variance
 
-    def _threshold_sample(self, sample: torch.FloatTensor) -> torch.FloatTensor:
+    def _threshold_sample(self, sample: torch.Tensor) -> torch.Tensor:
         """
         "Dynamic thresholding: At each sampling step we set s to a certain percentile absolute pixel value in xt0 (the
         prediction of x_0 at timestep t), and if s > 1, then we threshold xt0 to the range [-s, s] and then divide by
@@ -373,7 +370,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         pixels from saturation at each step. We find that dynamic thresholding results in significantly better
         photorealism as well as better image-text alignment, especially when using very large guidance weights."
 
-        https://arxiv.org/abs/2205.11487
+        https://huggingface.co/papers/2205.11487
         """
         dtype = sample.dtype
         batch_size, channels, *remaining_dims = sample.shape
@@ -400,9 +397,9 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
 
     def step(
         self,
-        model_output: torch.FloatTensor,
+        model_output: torch.Tensor,
         timestep: int,
-        sample: torch.FloatTensor,
+        sample: torch.Tensor,
         generator=None,
         return_dict: bool = True,
     ) -> Union[DDPMSchedulerOutput, Tuple]:
@@ -411,11 +408,11 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         process from the learned model outputs (most often the predicted noise).
 
         Args:
-            model_output (`torch.FloatTensor`):
+            model_output (`torch.Tensor`):
                 The direct output from learned diffusion model.
             timestep (`float`):
                 The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 A current instance of a sample created by the diffusion process.
             generator (`torch.Generator`, *optional*):
                 A random number generator.
@@ -446,7 +443,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         current_beta_t = 1 - current_alpha_t
 
         # 2. compute predicted original sample from predicted noise also called
-        # "predicted x_0" of formula (15) from https://arxiv.org/pdf/2006.11239.pdf
+        # "predicted x_0" of formula (15) from https://huggingface.co/papers/2006.11239
         if self.config.prediction_type == "epsilon":
             pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
         elif self.config.prediction_type == "sample":
@@ -468,12 +465,12 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
             )
 
         # 4. Compute coefficients for pred_original_sample x_0 and current sample x_t
-        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
+        # See formula (7) from https://huggingface.co/papers/2006.11239
         pred_original_sample_coeff = (alpha_prod_t_prev ** (0.5) * current_beta_t) / beta_prod_t
         current_sample_coeff = current_alpha_t ** (0.5) * beta_prod_t_prev / beta_prod_t
 
         # 5. Compute predicted previous sample µ_t
-        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
+        # See formula (7) from https://huggingface.co/papers/2006.11239
         pred_prev_sample = pred_original_sample_coeff * pred_original_sample + current_sample_coeff * sample
 
         # 6. Add noise
@@ -494,16 +491,19 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         pred_prev_sample = pred_prev_sample + variance
 
         if not return_dict:
-            return (pred_prev_sample,)
+            return (
+                pred_prev_sample,
+                pred_original_sample,
+            )
 
         return DDPMSchedulerOutput(prev_sample=pred_prev_sample, pred_original_sample=pred_original_sample)
 
     def add_noise(
         self,
-        original_samples: torch.FloatTensor,
-        noise: torch.FloatTensor,
+        original_samples: torch.Tensor,
+        noise: torch.Tensor,
         timesteps: torch.IntTensor,
-    ) -> torch.FloatTensor:
+    ) -> torch.Tensor:
         # Make sure alphas_cumprod and timestep have same device and dtype as original_samples
         # Move the self.alphas_cumprod to device to avoid redundant CPU to GPU data movement
         # for the subsequent add_noise calls
@@ -524,9 +524,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         noisy_samples = sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
         return noisy_samples
 
-    def get_velocity(
-        self, sample: torch.FloatTensor, noise: torch.FloatTensor, timesteps: torch.IntTensor
-    ) -> torch.FloatTensor:
+    def get_velocity(self, sample: torch.Tensor, noise: torch.Tensor, timesteps: torch.IntTensor) -> torch.Tensor:
         # Make sure alphas_cumprod and timestep have same device and dtype as sample
         self.alphas_cumprod = self.alphas_cumprod.to(device=sample.device)
         alphas_cumprod = self.alphas_cumprod.to(dtype=sample.dtype)
@@ -549,16 +547,12 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         return self.config.num_train_timesteps
 
     def previous_timestep(self, timestep):
-        if self.custom_timesteps:
+        if self.custom_timesteps or self.num_inference_steps:
             index = (self.timesteps == timestep).nonzero(as_tuple=True)[0][0]
             if index == self.timesteps.shape[0] - 1:
                 prev_t = torch.tensor(-1)
             else:
                 prev_t = self.timesteps[index + 1]
         else:
-            num_inference_steps = (
-                self.num_inference_steps if self.num_inference_steps else self.config.num_train_timesteps
-            )
-            prev_t = timestep - self.config.num_train_timesteps // num_inference_steps
-
+            prev_t = timestep - 1
         return prev_t

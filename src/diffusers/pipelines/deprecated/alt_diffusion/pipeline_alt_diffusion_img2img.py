@@ -23,9 +23,13 @@ from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, XLMR
 
 from ....configuration_utils import FrozenDict
 from ....image_processor import PipelineImageInput, VaeImageProcessor
-from ....loaders import FromSingleFileMixin, IPAdapterMixin, LoraLoaderMixin, TextualInversionLoaderMixin
+from ....loaders import (
+    FromSingleFileMixin,
+    IPAdapterMixin,
+    StableDiffusionLoraLoaderMixin,
+    TextualInversionLoaderMixin,
+)
 from ....models import AutoencoderKL, ImageProjection, UNet2DConditionModel
-from ....models.attention_processor import FusedAttnProcessor2_0
 from ....models.lora import adjust_lora_scale_text_encoder
 from ....schedulers import KarrasDiffusionSchedulers
 from ....utils import (
@@ -38,7 +42,7 @@ from ....utils import (
     unscale_lora_layers,
 )
 from ....utils.torch_utils import randn_tensor
-from ...pipeline_utils import DiffusionPipeline
+from ...pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from ...stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from .modeling_roberta_series import RobertaSeriesModelWithTransformation
 from .pipeline_output import AltDiffusionPipelineOutput
@@ -120,9 +124,10 @@ def retrieve_timesteps(
     num_inference_steps: Optional[int] = None,
     device: Optional[Union[str, torch.device]] = None,
     timesteps: Optional[List[int]] = None,
+    sigmas: Optional[List[float]] = None,
     **kwargs,
 ):
-    """
+    r"""
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
 
@@ -130,19 +135,23 @@ def retrieve_timesteps(
         scheduler (`SchedulerMixin`):
             The scheduler to get timesteps from.
         num_inference_steps (`int`):
-            The number of diffusion steps used when generating samples with a pre-trained model. If used,
-            `timesteps` must be `None`.
+            The number of diffusion steps used when generating samples with a pre-trained model. If used, `timesteps`
+            must be `None`.
         device (`str` or `torch.device`, *optional*):
             The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
         timesteps (`List[int]`, *optional*):
-                Custom timesteps used to support arbitrary spacing between timesteps. If `None`, then the default
-                timestep spacing strategy of the scheduler is used. If `timesteps` is passed, `num_inference_steps`
-                must be `None`.
+            Custom timesteps used to override the timestep spacing strategy of the scheduler. If `timesteps` is passed,
+            `num_inference_steps` and `sigmas` must be `None`.
+        sigmas (`List[float]`, *optional*):
+            Custom sigmas used to override the timestep spacing strategy of the scheduler. If `sigmas` is passed,
+            `num_inference_steps` and `timesteps` must be `None`.
 
     Returns:
         `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
         second element is the number of inference steps.
     """
+    if timesteps is not None and sigmas is not None:
+        raise ValueError("Only one of `timesteps` or `sigmas` can be passed. Please choose one to set custom values")
     if timesteps is not None:
         accepts_timesteps = "timesteps" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
         if not accepts_timesteps:
@@ -153,6 +162,16 @@ def retrieve_timesteps(
         scheduler.set_timesteps(timesteps=timesteps, device=device, **kwargs)
         timesteps = scheduler.timesteps
         num_inference_steps = len(timesteps)
+    elif sigmas is not None:
+        accept_sigmas = "sigmas" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
+        if not accept_sigmas:
+            raise ValueError(
+                f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
+                f" sigmas schedules. Please check whether you are using the correct scheduler."
+            )
+        scheduler.set_timesteps(sigmas=sigmas, device=device, **kwargs)
+        timesteps = scheduler.timesteps
+        num_inference_steps = len(timesteps)
     else:
         scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
         timesteps = scheduler.timesteps
@@ -160,7 +179,12 @@ def retrieve_timesteps(
 
 
 class AltDiffusionImg2ImgPipeline(
-    DiffusionPipeline, TextualInversionLoaderMixin, IPAdapterMixin, LoraLoaderMixin, FromSingleFileMixin
+    DiffusionPipeline,
+    StableDiffusionMixin,
+    TextualInversionLoaderMixin,
+    IPAdapterMixin,
+    StableDiffusionLoraLoaderMixin,
+    FromSingleFileMixin,
 ):
     r"""
     Pipeline for text-guided image-to-image generation using Alt Diffusion.
@@ -170,8 +194,8 @@ class AltDiffusionImg2ImgPipeline(
 
     The pipeline also inherits the following loading methods:
         - [`~loaders.TextualInversionLoaderMixin.load_textual_inversion`] for loading textual inversion embeddings
-        - [`~loaders.LoraLoaderMixin.load_lora_weights`] for loading LoRA weights
-        - [`~loaders.LoraLoaderMixin.save_lora_weights`] for saving LoRA weights
+        - [`~loaders.StableDiffusionLoraLoaderMixin.load_lora_weights`] for loading LoRA weights
+        - [`~loaders.StableDiffusionLoraLoaderMixin.save_lora_weights`] for saving LoRA weights
         - [`~loaders.FromSingleFileMixin.from_single_file`] for loading `.ckpt` files
         - [`~loaders.IPAdapterMixin.load_ip_adapter`] for loading IP Adapters
 
@@ -214,7 +238,7 @@ class AltDiffusionImg2ImgPipeline(
     ):
         super().__init__()
 
-        if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
+        if scheduler is not None and getattr(scheduler.config, "steps_offset", 1) != 1:
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
                 f" should be set to 1 instead of {scheduler.config.steps_offset}. Please make sure "
@@ -228,7 +252,7 @@ class AltDiffusionImg2ImgPipeline(
             new_config["steps_offset"] = 1
             scheduler._internal_dict = FrozenDict(new_config)
 
-        if hasattr(scheduler.config, "clip_sample") and scheduler.config.clip_sample is True:
+        if scheduler is not None and getattr(scheduler.config, "clip_sample", False) is True:
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} has not set the configuration `clip_sample`."
                 " `clip_sample` should be set to False in the configuration file. Please make sure to update the"
@@ -257,10 +281,14 @@ class AltDiffusionImg2ImgPipeline(
                 " checker. If you do not want to use the safety checker, you can pass `'safety_checker=None'` instead."
             )
 
-        is_unet_version_less_0_9_0 = hasattr(unet.config, "_diffusers_version") and version.parse(
-            version.parse(unet.config._diffusers_version).base_version
-        ) < version.parse("0.9.0.dev0")
-        is_unet_sample_size_less_64 = hasattr(unet.config, "sample_size") and unet.config.sample_size < 64
+        is_unet_version_less_0_9_0 = (
+            unet is not None
+            and hasattr(unet.config, "_diffusers_version")
+            and version.parse(version.parse(unet.config._diffusers_version).base_version) < version.parse("0.9.0.dev0")
+        )
+        is_unet_sample_size_less_64 = (
+            unet is not None and hasattr(unet.config, "sample_size") and unet.config.sample_size < 64
+        )
         if is_unet_version_less_0_9_0 and is_unet_sample_size_less_64:
             deprecation_message = (
                 "The configuration file of the unet has set the default `sample_size` to smaller than"
@@ -288,7 +316,7 @@ class AltDiffusionImg2ImgPipeline(
             feature_extractor=feature_extractor,
             image_encoder=image_encoder,
         )
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
 
@@ -299,8 +327,8 @@ class AltDiffusionImg2ImgPipeline(
         num_images_per_prompt,
         do_classifier_free_guidance,
         negative_prompt=None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
         lora_scale: Optional[float] = None,
         **kwargs,
     ):
@@ -331,8 +359,8 @@ class AltDiffusionImg2ImgPipeline(
         num_images_per_prompt,
         do_classifier_free_guidance,
         negative_prompt=None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
         lora_scale: Optional[float] = None,
         clip_skip: Optional[int] = None,
     ):
@@ -352,10 +380,10 @@ class AltDiffusionImg2ImgPipeline(
                 The prompt or prompts not to guide the image generation. If not defined, one has to pass
                 `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
                 less than `1`).
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
@@ -367,7 +395,7 @@ class AltDiffusionImg2ImgPipeline(
         """
         # set lora scale so that monkey patched LoRA
         # function of text encoder can correctly access it
-        if lora_scale is not None and isinstance(self, LoraLoaderMixin):
+        if lora_scale is not None and isinstance(self, StableDiffusionLoraLoaderMixin):
             self._lora_scale = lora_scale
 
             # dynamically adjust the LoRA scale
@@ -499,7 +527,7 @@ class AltDiffusionImg2ImgPipeline(
             negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
             negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
-        if isinstance(self, LoraLoaderMixin) and USE_PEFT_BACKEND:
+        if isinstance(self, StableDiffusionLoraLoaderMixin) and USE_PEFT_BACKEND:
             # Retrieve the original scale by scaling back the LoRA layers
             unscale_lora_layers(self.text_encoder, lora_scale)
 
@@ -557,7 +585,7 @@ class AltDiffusionImg2ImgPipeline(
     def prepare_extra_step_kwargs(self, generator, eta):
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
+        # eta corresponds to η in DDIM paper: https://huggingface.co/papers/2010.02502
         # and should be between [0, 1]
 
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
@@ -689,91 +717,6 @@ class AltDiffusionImg2ImgPipeline(
 
         return latents
 
-    def enable_freeu(self, s1: float, s2: float, b1: float, b2: float):
-        r"""Enables the FreeU mechanism as in https://arxiv.org/abs/2309.11497.
-
-        The suffixes after the scaling factors represent the stages where they are being applied.
-
-        Please refer to the [official repository](https://github.com/ChenyangSi/FreeU) for combinations of the values
-        that are known to work well for different pipelines such as Alt Diffusion v1, v2, and Alt Diffusion XL.
-
-        Args:
-            s1 (`float`):
-                Scaling factor for stage 1 to attenuate the contributions of the skip features. This is done to
-                mitigate "oversmoothing effect" in the enhanced denoising process.
-            s2 (`float`):
-                Scaling factor for stage 2 to attenuate the contributions of the skip features. This is done to
-                mitigate "oversmoothing effect" in the enhanced denoising process.
-            b1 (`float`): Scaling factor for stage 1 to amplify the contributions of backbone features.
-            b2 (`float`): Scaling factor for stage 2 to amplify the contributions of backbone features.
-        """
-        if not hasattr(self, "unet"):
-            raise ValueError("The pipeline must have `unet` for using FreeU.")
-        self.unet.enable_freeu(s1=s1, s2=s2, b1=b1, b2=b2)
-
-    def disable_freeu(self):
-        """Disables the FreeU mechanism if enabled."""
-        self.unet.disable_freeu()
-
-    def fuse_qkv_projections(self, unet: bool = True, vae: bool = True):
-        """
-        Enables fused QKV projections. For self-attention modules, all projection matrices (i.e., query,
-        key, value) are fused. For cross-attention modules, key and value projection matrices are fused.
-
-        <Tip warning={true}>
-
-        This API is 🧪 experimental.
-
-        </Tip>
-
-        Args:
-            unet (`bool`, defaults to `True`): To apply fusion on the UNet.
-            vae (`bool`, defaults to `True`): To apply fusion on the VAE.
-        """
-        self.fusing_unet = False
-        self.fusing_vae = False
-
-        if unet:
-            self.fusing_unet = True
-            self.unet.fuse_qkv_projections()
-            self.unet.set_attn_processor(FusedAttnProcessor2_0())
-
-        if vae:
-            if not isinstance(self.vae, AutoencoderKL):
-                raise ValueError("`fuse_qkv_projections()` is only supported for the VAE of type `AutoencoderKL`.")
-
-            self.fusing_vae = True
-            self.vae.fuse_qkv_projections()
-            self.vae.set_attn_processor(FusedAttnProcessor2_0())
-
-    def unfuse_qkv_projections(self, unet: bool = True, vae: bool = True):
-        """Disable QKV projection fusion if enabled.
-
-        <Tip warning={true}>
-
-        This API is 🧪 experimental.
-
-        </Tip>
-
-        Args:
-            unet (`bool`, defaults to `True`): To apply fusion on the UNet.
-            vae (`bool`, defaults to `True`): To apply fusion on the VAE.
-
-        """
-        if unet:
-            if not self.fusing_unet:
-                logger.warning("The UNet was not initially fused for QKV projections. Doing nothing.")
-            else:
-                self.unet.unfuse_qkv_projections()
-                self.fusing_unet = False
-
-        if vae:
-            if not self.fusing_vae:
-                logger.warning("The VAE was not initially fused for QKV projections. Doing nothing.")
-            else:
-                self.vae.unfuse_qkv_projections()
-                self.fusing_vae = False
-
     def get_guidance_scale_embedding(self, w, embedding_dim=512, dtype=torch.float32):
         """
         See https://github.com/google-research/vdm/blob/dc27b98a554f65cdc654b800da5aa1846545d41b/model_vdm.py#L298
@@ -787,7 +730,7 @@ class AltDiffusionImg2ImgPipeline(
                 data type of the generated embeddings
 
         Returns:
-            `torch.FloatTensor`: Embedding vectors with shape `(len(timesteps), embedding_dim)`
+            `torch.Tensor`: Embedding vectors with shape `(len(timesteps), embedding_dim)`
         """
         assert len(w.shape) == 1
         w = w * 1000.0
@@ -811,7 +754,7 @@ class AltDiffusionImg2ImgPipeline(
         return self._clip_skip
 
     # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-    # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+    # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
     # corresponds to doing no classifier free guidance.
     @property
     def do_classifier_free_guidance(self):
@@ -834,13 +777,14 @@ class AltDiffusionImg2ImgPipeline(
         strength: float = 0.8,
         num_inference_steps: Optional[int] = 50,
         timesteps: List[int] = None,
+        sigmas: List[float] = None,
         guidance_scale: Optional[float] = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: Optional[float] = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
         ip_adapter_image: Optional[PipelineImageInput] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
@@ -856,7 +800,7 @@ class AltDiffusionImg2ImgPipeline(
         Args:
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide image generation. If not defined, you need to pass `prompt_embeds`.
-            image (`torch.FloatTensor`, `PIL.Image.Image`, `np.ndarray`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
+            image (`torch.Tensor`, `PIL.Image.Image`, `np.ndarray`, `List[torch.Tensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
                 `Image`, numpy array or tensor representing an image batch to be used as the starting point. For both
                 numpy array and pytorch tensor, the expected value range is between `[0, 1]` If it's a tensor or a list
                 or tensors, the expected shape should be `(B, C, H, W)` or `(C, H, W)`. If it is a numpy array or a
@@ -884,15 +828,15 @@ class AltDiffusionImg2ImgPipeline(
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
             eta (`float`, *optional*, defaults to 0.0):
-                Corresponds to parameter eta (η) from the [DDIM](https://arxiv.org/abs/2010.02502) paper. Only applies
-                to the [`~schedulers.DDIMScheduler`], and is ignored in other schedulers.
+                Corresponds to parameter eta (η) from the [DDIM](https://huggingface.co/papers/2010.02502) paper. Only
+                applies to the [`~schedulers.DDIMScheduler`], and is ignored in other schedulers.
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make
                 generation deterministic.
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs (prompt weighting). If not
                 provided, text embeddings are generated from the `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs (prompt weighting). If
                 not provided, `negative_prompt_embeds` are generated from the `negative_prompt` input argument.
             ip_adapter_image: (`PipelineImageInput`, *optional*): Optional image input to work with IP Adapters.
@@ -1000,7 +944,9 @@ class AltDiffusionImg2ImgPipeline(
         image = self.image_processor.preprocess(image)
 
         # 5. set timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler, num_inference_steps, device, timesteps, sigmas
+        )
         timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
         latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
 

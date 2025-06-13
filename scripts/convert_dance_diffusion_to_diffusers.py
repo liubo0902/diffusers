@@ -4,12 +4,14 @@ import math
 import os
 from copy import deepcopy
 
+import requests
 import torch
 from audio_diffusion.models import DiffusionAttnUnet1D
 from diffusion import sampling
 from torch import nn
 
 from diffusers import DanceDiffusionPipeline, IPNDMScheduler, UNet1DModel
+from diffusers.utils.constants import DIFFUSERS_REQUEST_TIMEOUT
 
 
 MODELS_MAP = {
@@ -73,9 +75,14 @@ class DiffusionUncond(nn.Module):
 
 def download(model_name):
     url = MODELS_MAP[model_name]["url"]
-    os.system(f"wget {url} ./")
+    r = requests.get(url, stream=True, timeout=DIFFUSERS_REQUEST_TIMEOUT)
 
-    return f"./{model_name}.ckpt"
+    local_filename = f"./{model_name}.ckpt"
+    with open(local_filename, "wb") as fp:
+        for chunk in r.iter_content(chunk_size=8192):
+            fp.write(chunk)
+
+    return local_filename
 
 
 DOWN_NUM_TO_LAYER = {
@@ -254,9 +261,9 @@ def main(args):
 
     model_name = args.model_path.split("/")[-1].split(".")[0]
     if not os.path.isfile(args.model_path):
-        assert (
-            model_name == args.model_path
-        ), f"Make sure to provide one of the official model names {MODELS_MAP.keys()}"
+        assert model_name == args.model_path, (
+            f"Make sure to provide one of the official model names {MODELS_MAP.keys()}"
+        )
         args.model_path = download(model_name)
 
     sample_rate = MODELS_MAP[model_name]["sample_rate"]
@@ -283,9 +290,9 @@ def main(args):
     assert all(k.endswith("kernel") for k in list(diffusers_minus_renamed)), f"Problem with {diffusers_minus_renamed}"
 
     for key, value in renamed_state_dict.items():
-        assert (
-            diffusers_state_dict[key].squeeze().shape == value.squeeze().shape
-        ), f"Shape for {key} doesn't match. Diffusers: {diffusers_state_dict[key].shape} vs. {value.shape}"
+        assert diffusers_state_dict[key].squeeze().shape == value.squeeze().shape, (
+            f"Shape for {key} doesn't match. Diffusers: {diffusers_state_dict[key].shape} vs. {value.shape}"
+        )
         if key == "time_proj.weight":
             value = value.squeeze()
 

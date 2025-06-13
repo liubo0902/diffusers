@@ -18,12 +18,16 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion.stable_unclip_image_normalizer import StableUnCLIPImageNormalizer
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
+    backend_max_memory_allocated,
+    backend_reset_max_memory_allocated,
+    backend_reset_peak_memory_stats,
     enable_full_determinism,
     floats_tensor,
     load_image,
     load_numpy,
     nightly,
-    require_torch_gpu,
+    require_torch_accelerator,
     skip_mps,
     torch_device,
 )
@@ -50,6 +54,8 @@ class StableUnCLIPImg2ImgPipelineFastTests(
         []
     )  # TO-DO: update image_params once pipeline is refactored with VaeImageProcessor.preprocess
     image_latents_params = frozenset([])
+
+    supports_dduf = False
 
     def get_dummy_components(self):
         embedder_hidden_size = 32
@@ -182,7 +188,7 @@ class StableUnCLIPImg2ImgPipelineFastTests(
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 32, 32, 3)
-        expected_slice = np.array([0.3872, 0.7224, 0.5601, 0.4741, 0.6872, 0.5814, 0.4636, 0.3867, 0.5078])
+        expected_slice = np.array([0.4397, 0.7080, 0.5590, 0.4255, 0.7181, 0.5938, 0.4051, 0.3720, 0.5116])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-3
 
@@ -205,15 +211,25 @@ class StableUnCLIPImg2ImgPipelineFastTests(
     def test_xformers_attention_forwardGenerator_pass(self):
         self._test_xformers_attention_forwardGenerator_pass(test_max_difference=False)
 
+    @unittest.skip("Test not supported at the moment.")
+    def test_encode_prompt_works_in_isolation(self):
+        pass
+
 
 @nightly
-@require_torch_gpu
+@require_torch_accelerator
 class StableUnCLIPImg2ImgPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def test_stable_unclip_l_img2img(self):
         input_image = load_image(
@@ -227,7 +243,6 @@ class StableUnCLIPImg2ImgPipelineIntegrationTests(unittest.TestCase):
         pipe = StableUnCLIPImg2ImgPipeline.from_pretrained(
             "fusing/stable-unclip-2-1-l-img2img", torch_dtype=torch.float16
         )
-        pipe.to(torch_device)
         pipe.set_progress_bar_config(disable=None)
         # stable unclip will oom when integration tests are run on a V100,
         # so turn on memory savings
@@ -235,7 +250,7 @@ class StableUnCLIPImg2ImgPipelineIntegrationTests(unittest.TestCase):
         pipe.enable_sequential_cpu_offload()
 
         generator = torch.Generator(device="cpu").manual_seed(0)
-        output = pipe(input_image, "anime turle", generator=generator, output_type="np")
+        output = pipe(input_image, "anime turtle", generator=generator, output_type="np")
 
         image = output.images[0]
 
@@ -255,7 +270,6 @@ class StableUnCLIPImg2ImgPipelineIntegrationTests(unittest.TestCase):
         pipe = StableUnCLIPImg2ImgPipeline.from_pretrained(
             "fusing/stable-unclip-2-1-h-img2img", torch_dtype=torch.float16
         )
-        pipe.to(torch_device)
         pipe.set_progress_bar_config(disable=None)
         # stable unclip will oom when integration tests are run on a V100,
         # so turn on memory savings
@@ -263,7 +277,7 @@ class StableUnCLIPImg2ImgPipelineIntegrationTests(unittest.TestCase):
         pipe.enable_sequential_cpu_offload()
 
         generator = torch.Generator(device="cpu").manual_seed(0)
-        output = pipe(input_image, "anime turle", generator=generator, output_type="np")
+        output = pipe(input_image, "anime turtle", generator=generator, output_type="np")
 
         image = output.images[0]
 
@@ -276,14 +290,13 @@ class StableUnCLIPImg2ImgPipelineIntegrationTests(unittest.TestCase):
             "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/stable_unclip/turtle.png"
         )
 
-        torch.cuda.empty_cache()
-        torch.cuda.reset_max_memory_allocated()
-        torch.cuda.reset_peak_memory_stats()
+        backend_empty_cache(torch_device)
+        backend_reset_max_memory_allocated(torch_device)
+        backend_reset_peak_memory_stats(torch_device)
 
         pipe = StableUnCLIPImg2ImgPipeline.from_pretrained(
             "fusing/stable-unclip-2-1-h-img2img", torch_dtype=torch.float16
         )
-        pipe = pipe.to(torch_device)
         pipe.set_progress_bar_config(disable=None)
         pipe.enable_attention_slicing()
         pipe.enable_sequential_cpu_offload()
@@ -295,6 +308,6 @@ class StableUnCLIPImg2ImgPipelineIntegrationTests(unittest.TestCase):
             output_type="np",
         )
 
-        mem_bytes = torch.cuda.max_memory_allocated()
+        mem_bytes = backend_max_memory_allocated(torch_device)
         # make sure that less than 7 GB is allocated
         assert mem_bytes < 7 * 10**9

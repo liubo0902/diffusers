@@ -59,7 +59,7 @@ def betas_for_alpha_bar(
             return math.exp(t * -12.0)
 
     else:
-        raise ValueError(f"Unsupported alpha_tranform_type: {alpha_transform_type}")
+        raise ValueError(f"Unsupported alpha_transform_type: {alpha_transform_type}")
 
     betas = []
     for i in range(num_diffusion_timesteps):
@@ -104,9 +104,7 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
             The way the timesteps should be scaled. Refer to Table 2 of the [Common Diffusion Noise Schedules and
             Sample Steps are Flawed](https://huggingface.co/papers/2305.08891) for more information.
         steps_offset (`int`, defaults to 0):
-            An offset added to the inference steps. You can use a combination of `offset=1` and
-            `set_alpha_to_one=False` to make the last step use step 0 for the previous alpha product like in Stable
-            Diffusion.
+            An offset added to the inference steps, as required by some model families.
     """
 
     _compatibles = [e.name for e in KarrasDiffusionSchedulers]
@@ -137,7 +135,7 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
             # Glide cosine schedule
             self.betas = betas_for_alpha_bar(num_train_timesteps)
         else:
-            raise NotImplementedError(f"{beta_schedule} does is not implemented for {self.__class__}")
+            raise NotImplementedError(f"{beta_schedule} is not implemented for {self.__class__}")
 
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
@@ -148,7 +146,7 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
         self.init_noise_sigma = 1.0
 
         # For now we only support F-PNDM, i.e. the runge-kutta method
-        # For more information on the algorithm please take a look at the paper: https://arxiv.org/pdf/2202.09778.pdf
+        # For more information on the algorithm please take a look at the paper: https://huggingface.co/papers/2202.09778
         # mainly at formula (9), (12), (13) and the Algorithm 2.
         self.pndm_order = 4
 
@@ -177,7 +175,7 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
         """
 
         self.num_inference_steps = num_inference_steps
-        # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://arxiv.org/abs/2305.08891
+        # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://huggingface.co/papers/2305.08891
         if self.config.timestep_spacing == "linspace":
             self._timesteps = (
                 np.linspace(0, self.config.num_train_timesteps - 1, num_inference_steps).round().astype(np.int64)
@@ -227,9 +225,9 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
 
     def step(
         self,
-        model_output: torch.FloatTensor,
+        model_output: torch.Tensor,
         timestep: int,
-        sample: torch.FloatTensor,
+        sample: torch.Tensor,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """
@@ -238,11 +236,11 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
         or [`~PNDMScheduler.step_plms`] depending on the internal variable `counter`.
 
         Args:
-            model_output (`torch.FloatTensor`):
+            model_output (`torch.Tensor`):
                 The direct output from learned diffusion model.
             timestep (`int`):
                 The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 A current instance of a sample created by the diffusion process.
             return_dict (`bool`):
                 Whether or not to return a [`~schedulers.scheduling_utils.SchedulerOutput`] or `tuple`.
@@ -260,9 +258,9 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
 
     def step_prk(
         self,
-        model_output: torch.FloatTensor,
+        model_output: torch.Tensor,
         timestep: int,
-        sample: torch.FloatTensor,
+        sample: torch.Tensor,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """
@@ -271,11 +269,11 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
         equation.
 
         Args:
-            model_output (`torch.FloatTensor`):
+            model_output (`torch.Tensor`):
                 The direct output from learned diffusion model.
             timestep (`int`):
                 The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 A current instance of a sample created by the diffusion process.
             return_dict (`bool`):
                 Whether or not to return a [`~schedulers.scheduling_utils.SchedulerOutput`] or tuple.
@@ -320,9 +318,9 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
 
     def step_plms(
         self,
-        model_output: torch.FloatTensor,
+        model_output: torch.Tensor,
         timestep: int,
-        sample: torch.FloatTensor,
+        sample: torch.Tensor,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """
@@ -330,11 +328,11 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
         the linear multistep method. It performs one forward pass multiple times to approximate the solution.
 
         Args:
-            model_output (`torch.FloatTensor`):
+            model_output (`torch.Tensor`):
                 The direct output from learned diffusion model.
             timestep (`int`):
                 The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 A current instance of a sample created by the diffusion process.
             return_dict (`bool`):
                 Whether or not to return a [`~schedulers.scheduling_utils.SchedulerOutput`] or tuple.
@@ -389,23 +387,23 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
 
         return SchedulerOutput(prev_sample=prev_sample)
 
-    def scale_model_input(self, sample: torch.FloatTensor, *args, **kwargs) -> torch.FloatTensor:
+    def scale_model_input(self, sample: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         """
         Ensures interchangeability with schedulers that need to scale the denoising model input depending on the
         current timestep.
 
         Args:
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 The input sample.
 
         Returns:
-            `torch.FloatTensor`:
+            `torch.Tensor`:
                 A scaled input sample.
         """
         return sample
 
     def _get_prev_sample(self, sample, timestep, prev_timestep, model_output):
-        # See formula (9) of PNDM paper https://arxiv.org/pdf/2202.09778.pdf
+        # See formula (9) of PNDM paper https://huggingface.co/papers/2202.09778
         # this function computes x_(t−δ) using the formula of (9)
         # Note that x_t needs to be added to both sides of the equation
 
@@ -450,10 +448,10 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
     # Copied from diffusers.schedulers.scheduling_ddpm.DDPMScheduler.add_noise
     def add_noise(
         self,
-        original_samples: torch.FloatTensor,
-        noise: torch.FloatTensor,
+        original_samples: torch.Tensor,
+        noise: torch.Tensor,
         timesteps: torch.IntTensor,
-    ) -> torch.FloatTensor:
+    ) -> torch.Tensor:
         # Make sure alphas_cumprod and timestep have same device and dtype as original_samples
         # Move the self.alphas_cumprod to device to avoid redundant CPU to GPU data movement
         # for the subsequent add_noise calls

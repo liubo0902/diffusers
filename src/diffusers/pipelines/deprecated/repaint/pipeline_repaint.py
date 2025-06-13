@@ -91,7 +91,7 @@ class RePaintPipeline(DiffusionPipeline):
     scheduler: RePaintScheduler
     model_cpu_offload_seq = "unet"
 
-    def __init__(self, unet, scheduler):
+    def __init__(self, unet: UNet2DModel, scheduler: RePaintScheduler):
         super().__init__()
         self.register_modules(unet=unet, scheduler=scheduler)
 
@@ -112,9 +112,9 @@ class RePaintPipeline(DiffusionPipeline):
         The call function to the pipeline for generation.
 
         Args:
-            image (`torch.FloatTensor` or `PIL.Image.Image`):
+            image (`torch.Tensor` or `PIL.Image.Image`):
                 The original image to inpaint on.
-            mask_image (`torch.FloatTensor` or `PIL.Image.Image`):
+            mask_image (`torch.Tensor` or `PIL.Image.Image`):
                 The mask_image where 0.0 define which part of the original image to inpaint.
             num_inference_steps (`int`, *optional*, defaults to 1000):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
@@ -124,10 +124,11 @@ class RePaintPipeline(DiffusionPipeline):
                 DDIM and 1.0 is the DDPM scheduler.
             jump_length (`int`, *optional*, defaults to 10):
                 The number of steps taken forward in time before going backward in time for a single jump ("j" in
-                RePaint paper). Take a look at Figure 9 and 10 in the [paper](https://arxiv.org/pdf/2201.09865.pdf).
+                RePaint paper). Take a look at Figure 9 and 10 in the
+                [paper](https://huggingface.co/papers/2201.09865).
             jump_n_sample (`int`, *optional*, defaults to 10):
                 The number of times to make a forward time jump for a given chosen time sample. Take a look at Figure 9
-                and 10 in the [paper](https://arxiv.org/pdf/2201.09865.pdf).
+                and 10 in the [paper](https://huggingface.co/papers/2201.09865).
             generator (`torch.Generator`, *optional*):
                 A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make
                 generation deterministic.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -76,7 +76,7 @@ else:
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.27.0.dev0")
+check_min_version("0.34.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -106,6 +106,7 @@ These are textual inversion adaption weights for {base_model}. You can find some
         "stable-diffusion-xl-diffusers",
         "text-to-image",
         "diffusers",
+        "diffusers-training",
         "textual_inversion",
     ]
 
@@ -134,7 +135,7 @@ def log_validation(
     pipeline = DiffusionPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         text_encoder=accelerator.unwrap_model(text_encoder_1),
-        text_encoder_2=text_encoder_2,
+        text_encoder_2=accelerator.unwrap_model(text_encoder_2),
         tokenizer=tokenizer_1,
         tokenizer_2=tokenizer_2,
         unet=unet,
@@ -546,6 +547,8 @@ class TextualInversionDataset(Dataset):
 
         example["original_size"] = (image.height, image.width)
 
+        image = image.resize((self.size, self.size), resample=self.interpolation)
+
         if self.center_crop:
             y1 = max(0, int(round((image.height - self.size) / 2.0)))
             x1 = max(0, int(round((image.width - self.size) / 2.0)))
@@ -576,7 +579,6 @@ class TextualInversionDataset(Dataset):
         img = np.array(image).astype(np.uint8)
 
         image = Image.fromarray(img)
-        image = image.resize((self.size, self.size), resample=self.interpolation)
 
         image = self.flip_transform(image)
         image = np.array(image).astype(np.uint8)
@@ -602,6 +604,10 @@ def main():
         log_with=args.report_to,
         project_config=accelerator_project_config,
     )
+
+    # Disable AMP for MPS.
+    if torch.backends.mps.is_available():
+        accelerator.native_amp = False
 
     if args.report_to == "wandb":
         if not is_wandb_available():
@@ -672,36 +678,54 @@ def main():
             f"The tokenizer already contains the token {args.placeholder_token}. Please pass a different"
             " `placeholder_token` that is not already in the tokenizer."
         )
+    num_added_tokens = tokenizer_2.add_tokens(placeholder_tokens)
+    if num_added_tokens != args.num_vectors:
+        raise ValueError(
+            f"The 2nd tokenizer already contains the token {args.placeholder_token}. Please pass a different"
+            " `placeholder_token` that is not already in the tokenizer."
+        )
 
     # Convert the initializer_token, placeholder_token to ids
     token_ids = tokenizer_1.encode(args.initializer_token, add_special_tokens=False)
+    token_ids_2 = tokenizer_2.encode(args.initializer_token, add_special_tokens=False)
+
     # Check if initializer_token is a single token or a sequence of tokens
-    if len(token_ids) > 1:
+    if len(token_ids) > 1 or len(token_ids_2) > 1:
         raise ValueError("The initializer token must be a single token.")
 
     initializer_token_id = token_ids[0]
     placeholder_token_ids = tokenizer_1.convert_tokens_to_ids(placeholder_tokens)
+    initializer_token_id_2 = token_ids_2[0]
+    placeholder_token_ids_2 = tokenizer_2.convert_tokens_to_ids(placeholder_tokens)
 
     # Resize the token embeddings as we are adding new special tokens to the tokenizer
     text_encoder_1.resize_token_embeddings(len(tokenizer_1))
+    text_encoder_2.resize_token_embeddings(len(tokenizer_2))
 
     # Initialise the newly added placeholder token with the embeddings of the initializer token
     token_embeds = text_encoder_1.get_input_embeddings().weight.data
+    token_embeds_2 = text_encoder_2.get_input_embeddings().weight.data
     with torch.no_grad():
         for token_id in placeholder_token_ids:
             token_embeds[token_id] = token_embeds[initializer_token_id].clone()
+        for token_id in placeholder_token_ids_2:
+            token_embeds_2[token_id] = token_embeds_2[initializer_token_id_2].clone()
 
     # Freeze vae and unet
     vae.requires_grad_(False)
     unet.requires_grad_(False)
-    text_encoder_2.requires_grad_(False)
+
     # Freeze all parameters except for the token embeddings in text encoder
     text_encoder_1.text_model.encoder.requires_grad_(False)
     text_encoder_1.text_model.final_layer_norm.requires_grad_(False)
     text_encoder_1.text_model.embeddings.position_embedding.requires_grad_(False)
+    text_encoder_2.text_model.encoder.requires_grad_(False)
+    text_encoder_2.text_model.final_layer_norm.requires_grad_(False)
+    text_encoder_2.text_model.embeddings.position_embedding.requires_grad_(False)
 
     if args.gradient_checkpointing:
         text_encoder_1.gradient_checkpointing_enable()
+        text_encoder_2.gradient_checkpointing_enable()
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -709,7 +733,7 @@ def main():
 
             xformers_version = version.parse(xformers.__version__)
             if xformers_version == version.parse("0.0.16"):
-                logger.warn(
+                logger.warning(
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
@@ -740,7 +764,11 @@ def main():
         optimizer_class = torch.optim.AdamW
 
     optimizer = optimizer_class(
-        text_encoder_1.get_input_embeddings().parameters(),  # only optimize the embeddings
+        # only optimize the embeddings
+        [
+            text_encoder_1.text_model.embeddings.token_embedding.weight,
+            text_encoder_2.text_model.embeddings.token_embedding.weight,
+        ],
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -765,27 +793,33 @@ def main():
     )
 
     # Scheduler and math around the number of training steps.
-    overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    # Check the PR https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
+    num_warmup_steps_for_scheduler = args.lr_warmup_steps * accelerator.num_processes
     if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
+        len_train_dataloader_after_sharding = math.ceil(len(train_dataloader) / accelerator.num_processes)
+        num_update_steps_per_epoch = math.ceil(len_train_dataloader_after_sharding / args.gradient_accumulation_steps)
+        num_training_steps_for_scheduler = (
+            args.num_train_epochs * num_update_steps_per_epoch * accelerator.num_processes
+        )
+    else:
+        num_training_steps_for_scheduler = args.max_train_steps * accelerator.num_processes
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_warmup_steps=num_warmup_steps_for_scheduler,
+        num_training_steps=num_training_steps_for_scheduler,
         num_cycles=args.lr_num_cycles,
     )
 
     text_encoder_1.train()
+    text_encoder_2.train()
     # Prepare everything with our `accelerator`.
-    text_encoder_1, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        text_encoder_1, optimizer, train_dataloader, lr_scheduler
+    text_encoder_1, text_encoder_2, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        text_encoder_1, text_encoder_2, optimizer, train_dataloader, lr_scheduler
     )
 
-    # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
+    # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -800,8 +834,14 @@ def main():
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if overrode_max_train_steps:
+    if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        if num_training_steps_for_scheduler != args.max_train_steps * accelerator.num_processes:
+            logger.warning(
+                f"The length of the 'train_dataloader' after 'accelerator.prepare' ({len(train_dataloader)}) does not match "
+                f"the expected length ({len_train_dataloader_after_sharding}) when the learning rate scheduler was created. "
+                f"This inconsistency may result in the learning rate scheduler not functioning properly."
+            )
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
@@ -860,11 +900,13 @@ def main():
 
     # keep original embeddings as reference
     orig_embeds_params = accelerator.unwrap_model(text_encoder_1).get_input_embeddings().weight.data.clone()
+    orig_embeds_params_2 = accelerator.unwrap_model(text_encoder_2).get_input_embeddings().weight.data.clone()
 
     for epoch in range(first_epoch, args.num_train_epochs):
         text_encoder_1.train()
+        text_encoder_2.train()
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(text_encoder_1):
+            with accelerator.accumulate([text_encoder_1, text_encoder_2]):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample().detach()
                 latents = latents * vae.config.scaling_factor
@@ -886,9 +928,7 @@ def main():
                     .hidden_states[-2]
                     .to(dtype=weight_dtype)
                 )
-                encoder_output_2 = text_encoder_2(
-                    batch["input_ids_2"].reshape(batch["input_ids_1"].shape[0], -1), output_hidden_states=True
-                )
+                encoder_output_2 = text_encoder_2(batch["input_ids_2"], output_hidden_states=True)
                 encoder_hidden_states_2 = encoder_output_2.hidden_states[-2].to(dtype=weight_dtype)
                 original_size = [
                     (batch["original_size"][0][i].item(), batch["original_size"][1][i].item())
@@ -932,11 +972,16 @@ def main():
                 # Let's make sure we don't update any embedding weights besides the newly added token
                 index_no_updates = torch.ones((len(tokenizer_1),), dtype=torch.bool)
                 index_no_updates[min(placeholder_token_ids) : max(placeholder_token_ids) + 1] = False
+                index_no_updates_2 = torch.ones((len(tokenizer_2),), dtype=torch.bool)
+                index_no_updates_2[min(placeholder_token_ids_2) : max(placeholder_token_ids_2) + 1] = False
 
                 with torch.no_grad():
-                    accelerator.unwrap_model(text_encoder_1).get_input_embeddings().weight[
-                        index_no_updates
-                    ] = orig_embeds_params[index_no_updates]
+                    accelerator.unwrap_model(text_encoder_1).get_input_embeddings().weight[index_no_updates] = (
+                        orig_embeds_params[index_no_updates]
+                    )
+                    accelerator.unwrap_model(text_encoder_2).get_input_embeddings().weight[index_no_updates_2] = (
+                        orig_embeds_params_2[index_no_updates_2]
+                    )
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -949,6 +994,16 @@ def main():
                     save_progress(
                         text_encoder_1,
                         placeholder_token_ids,
+                        accelerator,
+                        args,
+                        save_path,
+                        safe_serialization=True,
+                    )
+                    weight_name = f"learned_embeds_2-steps-{global_step}.safetensors"
+                    save_path = os.path.join(args.output_dir, weight_name)
+                    save_progress(
+                        text_encoder_2,
+                        placeholder_token_ids_2,
                         accelerator,
                         args,
                         save_path,
@@ -1020,7 +1075,7 @@ def main():
             )
 
         if args.push_to_hub and not args.save_as_full_pipeline:
-            logger.warn("Enabling full model saving because --push_to_hub=True was specified.")
+            logger.warning("Enabling full model saving because --push_to_hub=True was specified.")
             save_full_model = True
         else:
             save_full_model = args.save_as_full_pipeline
@@ -1028,7 +1083,7 @@ def main():
             pipeline = DiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 text_encoder=accelerator.unwrap_model(text_encoder_1),
-                text_encoder_2=text_encoder_2,
+                text_encoder_2=accelerator.unwrap_model(text_encoder_2),
                 vae=vae,
                 unet=unet,
                 tokenizer=tokenizer_1,
@@ -1041,6 +1096,16 @@ def main():
         save_progress(
             text_encoder_1,
             placeholder_token_ids,
+            accelerator,
+            args,
+            save_path,
+            safe_serialization=True,
+        )
+        weight_name = "learned_embeds_2.safetensors"
+        save_path = os.path.join(args.output_dir, weight_name)
+        save_progress(
+            text_encoder_2,
+            placeholder_token_ids_2,
             accelerator,
             args,
             save_path,

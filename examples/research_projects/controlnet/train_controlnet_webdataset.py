@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ from PIL import Image
 from torch.utils.data import default_collate
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, DPTFeatureExtractor, DPTForDepthEstimation, PretrainedConfig
+from transformers import AutoTokenizer, DPTForDepthEstimation, DPTImageProcessor, PretrainedConfig
 from webdataset.tariterators import (
     base_plus_ext,
     tar_file_expander,
@@ -205,7 +205,7 @@ class Text2ImageDataset:
         pin_memory: bool = False,
         persistent_workers: bool = False,
         control_type: str = "canny",
-        feature_extractor: Optional[DPTFeatureExtractor] = None,
+        feature_extractor: Optional[DPTImageProcessor] = None,
     ):
         if not isinstance(train_shards_path_or_url, str):
             train_shards_path_or_url = [list(braceexpand(urls)) for urls in train_shards_path_or_url]
@@ -381,9 +381,7 @@ def log_validation(vae, unet, controlnet, args, accelerator, weight_dtype, step)
                 validation_prompt = log["validation_prompt"]
                 validation_image = log["validation_image"]
 
-                formatted_images = []
-
-                formatted_images.append(np.asarray(validation_image))
+                formatted_images = [np.asarray(validation_image)]
 
                 for image in images:
                     formatted_images.append(np.asarray(image))
@@ -407,7 +405,7 @@ def log_validation(vae, unet, controlnet, args, accelerator, weight_dtype, step)
 
             tracker.log({"validation": formatted_images})
         else:
-            logger.warn(f"image logging not implemented for {tracker.name}")
+            logger.warning(f"image logging not implemented for {tracker.name}")
 
         del pipeline
         gc.collect()
@@ -460,6 +458,8 @@ tags:
 - text-to-image
 - diffusers
 - controlnet
+- diffusers-training
+- webdataset
 inference: true
 ---
     """
@@ -803,21 +803,20 @@ def parse_args(input_args=None):
         "--control_type",
         type=str,
         default="canny",
-        help=("The type of controlnet conditioning image to use. One of `canny`, `depth`" " Defaults to `canny`."),
+        help=("The type of controlnet conditioning image to use. One of `canny`, `depth` Defaults to `canny`."),
     )
     parser.add_argument(
         "--transformer_layers_per_block",
         type=str,
         default=None,
-        help=("The number of layers per block in the transformer. If None, defaults to" " `args.transformer_layers`."),
+        help=("The number of layers per block in the transformer. If None, defaults to `args.transformer_layers`."),
     )
     parser.add_argument(
         "--old_style_controlnet",
         action="store_true",
         default=False,
         help=(
-            "Use the old style controlnet, which is a single transformer layer with"
-            " a single head. Defaults to False."
+            "Use the old style controlnet, which is a single transformer layer with a single head. Defaults to False."
         ),
     )
 
@@ -914,6 +913,10 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
+    # Disable AMP for MPS.
+    if torch.backends.mps.is_available():
+        accelerator.native_amp = False
+
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -1005,7 +1008,7 @@ def main(args):
         controlnet = pre_controlnet
 
     if args.control_type == "depth":
-        feature_extractor = DPTFeatureExtractor.from_pretrained("Intel/dpt-hybrid-midas")
+        feature_extractor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
         depth_model = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas")
         depth_model.requires_grad_(False)
     else:
@@ -1055,7 +1058,7 @@ def main(args):
 
             xformers_version = version.parse(xformers.__version__)
             if xformers_version == version.parse("0.0.16"):
-                logger.warn(
+                logger.warning(
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()

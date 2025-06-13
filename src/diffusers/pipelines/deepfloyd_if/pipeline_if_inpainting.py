@@ -9,15 +9,15 @@ import PIL.Image
 import torch
 from transformers import CLIPImageProcessor, T5EncoderModel, T5Tokenizer
 
-from ...loaders import LoraLoaderMixin
+from ...loaders import StableDiffusionLoraLoaderMixin
 from ...models import UNet2DConditionModel
 from ...schedulers import DDPMScheduler
 from ...utils import (
     BACKENDS_MAPPING,
     PIL_INTERPOLATION,
-    is_accelerate_available,
     is_bs4_available,
     is_ftfy_available,
+    is_torch_xla_available,
     logging,
     replace_example_docstring,
 )
@@ -28,7 +28,15 @@ from .safety_checker import IFSafetyChecker
 from .watermark import IFWatermarker
 
 
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
 
 if is_bs4_available():
     from bs4 import BeautifulSoup
@@ -112,7 +120,7 @@ EXAMPLE_DOC_STRING = """
 """
 
 
-class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
+class IFInpaintingPipeline(DiffusionPipeline, StableDiffusionLoraLoaderMixin):
     tokenizer: T5Tokenizer
     text_encoder: T5EncoderModel
 
@@ -142,6 +150,7 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
 
     _optional_components = ["tokenizer", "text_encoder", "safety_checker", "feature_extractor", "watermarker"]
     model_cpu_offload_seq = "text_encoder->unet"
+    _exclude_from_cpu_offload = ["watermarker"]
 
     def __init__(
         self,
@@ -183,21 +192,6 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
         )
         self.register_to_config(requires_safety_checker=requires_safety_checker)
 
-    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.remove_all_hooks
-    def remove_all_hooks(self):
-        if is_accelerate_available():
-            from accelerate.hooks import remove_hook_from_module
-        else:
-            raise ImportError("Please install accelerate via `pip install accelerate`")
-
-        for model in [self.text_encoder, self.unet, self.safety_checker]:
-            if model is not None:
-                remove_hook_from_module(model, recurse=True)
-
-        self.unet_offload_hook = None
-        self.text_encoder_offload_hook = None
-        self.final_offload_hook = None
-
     @torch.no_grad()
     # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.encode_prompt
     def encode_prompt(
@@ -207,8 +201,8 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
         num_images_per_prompt: int = 1,
         device: Optional[torch.device] = None,
         negative_prompt: Optional[Union[str, List[str]]] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
         clean_caption: bool = False,
     ):
         r"""
@@ -227,10 +221,10 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
                 The prompt or prompts not to guide the image generation. If not defined, one has to pass
                 `negative_prompt_embeds`. instead. If not defined, one has to pass `negative_prompt_embeds`. instead.
                 Ignored when not using guidance (i.e., ignored if `guidance_scale` is less than `1`).
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
@@ -365,16 +359,13 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
             nsfw_detected = None
             watermark_detected = None
 
-            if hasattr(self, "unet_offload_hook") and self.unet_offload_hook is not None:
-                self.unet_offload_hook.offload()
-
         return image, nsfw_detected, watermark_detected
 
     # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.prepare_extra_step_kwargs
     def prepare_extra_step_kwargs(self, generator, eta):
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
+        # eta corresponds to η in DDIM paper: https://huggingface.co/papers/2010.02502
         # and should be between [0, 1]
 
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
@@ -446,7 +437,7 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
             and not isinstance(check_image_type, np.ndarray)
         ):
             raise ValueError(
-                "`image` has to be of type `torch.FloatTensor`, `PIL.Image.Image`, `np.ndarray`, or List[...] but is"
+                "`image` has to be of type `torch.Tensor`, `PIL.Image.Image`, `np.ndarray`, or List[...] but is"
                 f" {type(check_image_type)}"
             )
 
@@ -477,7 +468,7 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
             and not isinstance(check_image_type, np.ndarray)
         ):
             raise ValueError(
-                "`mask_image` has to be of type `torch.FloatTensor`, `PIL.Image.Image`, `np.ndarray`, or List[...] but is"
+                "`mask_image` has to be of type `torch.Tensor`, `PIL.Image.Image`, `np.ndarray`, or List[...] but is"
                 f" {type(check_image_type)}"
             )
 
@@ -500,13 +491,13 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
     # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline._text_preprocessing
     def _text_preprocessing(self, text, clean_caption=False):
         if clean_caption and not is_bs4_available():
-            logger.warn(BACKENDS_MAPPING["bs4"][-1].format("Setting `clean_caption=True`"))
-            logger.warn("Setting `clean_caption` to False...")
+            logger.warning(BACKENDS_MAPPING["bs4"][-1].format("Setting `clean_caption=True`"))
+            logger.warning("Setting `clean_caption` to False...")
             clean_caption = False
 
         if clean_caption and not is_ftfy_available():
-            logger.warn(BACKENDS_MAPPING["ftfy"][-1].format("Setting `clean_caption=True`"))
-            logger.warn("Setting `clean_caption` to False...")
+            logger.warning(BACKENDS_MAPPING["ftfy"][-1].format("Setting `clean_caption=True`"))
+            logger.warning("Setting `clean_caption` to False...")
             clean_caption = False
 
         if not isinstance(text, (tuple, list)):
@@ -577,7 +568,7 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
         # &amp
         caption = re.sub(r"&amp", "", caption)
 
-        # ip adresses:
+        # ip addresses:
         caption = re.sub(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", " ", caption)
 
         # article ids:
@@ -654,7 +645,7 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
 
             for image_ in image:
                 image_ = image_.convert("RGB")
-                image_ = resize(image_, self.unet.sample_size)
+                image_ = resize(image_, self.unet.config.sample_size)
                 image_ = np.array(image_)
                 image_ = image_.astype(np.float32)
                 image_ = image_ / 127.5 - 1
@@ -701,7 +692,7 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
 
             for mask_image_ in mask_image:
                 mask_image_ = mask_image_.convert("L")
-                mask_image_ = resize(mask_image_, self.unet.sample_size)
+                mask_image_ = resize(mask_image_, self.unet.config.sample_size)
                 mask_image_ = np.array(mask_image_)
                 mask_image_ = mask_image_[None, None, :]
                 new_mask_image.append(mask_image_)
@@ -723,13 +714,15 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
 
         return mask_image
 
-    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if_img2img.IFImg2ImgPipeline.get_timesteps
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.StableDiffusionImg2ImgPipeline.get_timesteps
     def get_timesteps(self, num_inference_steps, strength):
         # get the original timestep using init_timestep
         init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
 
         t_start = max(num_inference_steps - init_timestep, 0)
-        timesteps = self.scheduler.timesteps[t_start:]
+        timesteps = self.scheduler.timesteps[t_start * self.scheduler.order :]
+        if hasattr(self.scheduler, "set_begin_index"):
+            self.scheduler.set_begin_index(t_start * self.scheduler.order)
 
         return timesteps, num_inference_steps - t_start
 
@@ -776,11 +769,11 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
         callback_steps: int = 1,
         clean_caption: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -792,7 +785,7 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
                 instead.
-            image (`torch.FloatTensor` or `PIL.Image.Image`):
+            image (`torch.Tensor` or `PIL.Image.Image`):
                 `Image`, or tensor representing an image batch, that will be used as the starting point for the
                 process.
             mask_image (`PIL.Image.Image`):
@@ -813,11 +806,11 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
                 Custom timesteps to use for the denoising process. If not defined, equal spaced `num_inference_steps`
                 timesteps are used. Must be in descending order.
             guidance_scale (`float`, *optional*, defaults to 7.0):
-                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
-                `guidance_scale` is defined as `w` of equation 2. of [Imagen
-                Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
-                1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
-                usually at the expense of lower image quality.
+                Guidance scale as defined in [Classifier-Free Diffusion
+                Guidance](https://huggingface.co/papers/2207.12598). `guidance_scale` is defined as `w` of equation 2.
+                of [Imagen Paper](https://huggingface.co/papers/2205.11487). Guidance scale is enabled by setting
+                `guidance_scale > 1`. Higher guidance scale encourages to generate images that are closely linked to
+                the text `prompt`, usually at the expense of lower image quality.
             negative_prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation. If not defined, one has to pass
                 `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
@@ -825,15 +818,15 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
             eta (`float`, *optional*, defaults to 0.0):
-                Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
-                [`schedulers.DDIMScheduler`], will be ignored for others.
+                Corresponds to parameter eta (η) in the DDIM paper: https://huggingface.co/papers/2010.02502. Only
+                applies to [`schedulers.DDIMScheduler`], will be ignored for others.
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
@@ -844,7 +837,7 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
                 Whether or not to return a [`~pipelines.stable_diffusion.IFPipelineOutput`] instead of a plain tuple.
             callback (`Callable`, *optional*):
                 A function that will be called every `callback_steps` steps during inference. The function will be
-                called with the following arguments: `callback(step: int, timestep: int, latents: torch.FloatTensor)`.
+                called with the following arguments: `callback(step: int, timestep: int, latents: torch.Tensor)`.
             callback_steps (`int`, *optional*, defaults to 1):
                 The frequency at which the `callback` function will be called. If not specified, the callback will be
                 called at every step.
@@ -889,7 +882,7 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
         device = self._execution_device
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+        # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
@@ -990,6 +983,9 @@ class IFInpaintingPipeline(DiffusionPipeline, LoraLoaderMixin):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, intermediate_images)
+
+                if XLA_AVAILABLE:
+                    xm.mark_step()
 
         image = intermediate_images
 

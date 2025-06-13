@@ -20,7 +20,7 @@ specific language governing permissions and limitations under the License.
 
 </Tip>
 
-[LoRA(Low-Rank Adaptation of Large Language Models)](https://arxiv.org/abs/2106.09685)는 메모리를 적게 사용하면서 대규모 모델의 학습을 가속화하는 학습 방법입니다. 이는 rank-decomposition weight 행렬 쌍(**업데이트 행렬**이라고 함)을 추가하고 새로 추가된 가중치**만** 학습합니다. 여기에는 몇 가지 장점이 있습니다.
+[LoRA(Low-Rank Adaptation of Large Language Models)](https://huggingface.co/papers/2106.09685)는 메모리를 적게 사용하면서 대규모 모델의 학습을 가속화하는 학습 방법입니다. 이는 rank-decomposition weight 행렬 쌍(**업데이트 행렬**이라고 함)을 추가하고 새로 추가된 가중치**만** 학습합니다. 여기에는 몇 가지 장점이 있습니다.
 
 - 이전에 미리 학습된 가중치는 고정된 상태로 유지되므로 모델이 [치명적인 망각](https://www.pnas.org/doi/10.1073/pnas.1611835114) 경향이 없습니다.
 - Rank-decomposition 행렬은 원래 모델보다 파라메터 수가 훨씬 적으므로 학습된 LoRA 가중치를 쉽게 끼워넣을 수 있습니다.
@@ -36,7 +36,7 @@ specific language governing permissions and limitations under the License.
 
 [cloneofsimo](https://github.com/cloneofsimo)는 인기 있는 [lora](https://github.com/cloneofsimo/lora) GitHub 리포지토리에서 Stable Diffusion을 위한 LoRA 학습을 최초로 시도했습니다. 🧨 Diffusers는 [text-to-image 생성](https://github.com/huggingface/diffusers/tree/main/examples/text_to_image#training-with-lora) 및 [DreamBooth](https://github.com/huggingface/diffusers/tree/main/examples/dreambooth#training-with-low-rank-adaptation-of-large-language-models-lora)을 지원합니다. 이 가이드는 두 가지를 모두 수행하는 방법을 보여줍니다.
 
-모델을 저장하거나 커뮤니티와 공유하려면 Hugging Face 계정에 로그인하세요(아직 계정이 없는 경우 [생성](hf.co/join)하세요):
+모델을 저장하거나 커뮤니티와 공유하려면 Hugging Face 계정에 로그인하세요(아직 계정이 없는 경우 [생성](https://huggingface.co/join)하세요):
 
 ```bash
 huggingface-cli login
@@ -49,15 +49,15 @@ huggingface-cli login
 
 ### 학습[[dreambooth-training]]
 
-[Pokémon BLIP 캡션](https://huggingface.co/datasets/lambdalabs/pokemon-blip-captions) 데이터셋으로 [`stable-diffusion-v1-5`](https://huggingface.co/runwayml/stable-diffusion-v1-5)를 파인튜닝해 나만의 포켓몬을 생성해 보겠습니다.
+[Naruto BLIP 캡션](https://huggingface.co/datasets/lambdalabs/naruto-blip-captions) 데이터셋으로 [`stable-diffusion-v1-5`](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5)를 파인튜닝해 나만의 포켓몬을 생성해 보겠습니다.
 
 시작하려면 `MODEL_NAME` 및 `DATASET_NAME` 환경 변수가 설정되어 있는지 확인하십시오. `OUTPUT_DIR` 및 `HUB_MODEL_ID` 변수는 선택 사항이며 허브에서 모델을 저장할 위치를 지정합니다.
 
 ```bash
-export MODEL_NAME="runwayml/stable-diffusion-v1-5"
-export OUTPUT_DIR="/sddata/finetune/lora/pokemon"
-export HUB_MODEL_ID="pokemon-lora"
-export DATASET_NAME="lambdalabs/pokemon-blip-captions"
+export MODEL_NAME="stable-diffusion-v1-5/stable-diffusion-v1-5"
+export OUTPUT_DIR="/sddata/finetune/lora/naruto"
+export HUB_MODEL_ID="naruto-lora"
+export DATASET_NAME="lambdalabs/naruto-blip-captions"
 ```
 
 학습을 시작하기 전에 알아야 할 몇 가지 플래그가 있습니다.
@@ -97,7 +97,7 @@ accelerate launch train_dreambooth_lora.py \
 >>> import torch
 >>> from diffusers import StableDiffusionPipeline
 
->>> model_base = "runwayml/stable-diffusion-v1-5"
+>>> model_base = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 
 >>> pipe = StableDiffusionPipeline.from_pretrained(model_base, torch_dtype=torch.float16)
 ```

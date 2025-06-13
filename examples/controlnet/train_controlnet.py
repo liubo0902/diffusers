@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 
 import argparse
+import contextlib
+import gc
 import logging
 import math
 import os
@@ -58,7 +60,7 @@ if is_wandb_available():
     import wandb
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.27.0.dev0")
+check_min_version("0.34.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -74,10 +76,15 @@ def image_grid(imgs, rows, cols):
     return grid
 
 
-def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step):
+def log_validation(
+    vae, text_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step, is_final_validation=False
+):
     logger.info("Running validation... ")
 
-    controlnet = accelerator.unwrap_model(controlnet)
+    if not is_final_validation:
+        controlnet = accelerator.unwrap_model(controlnet)
+    else:
+        controlnet = ControlNetModel.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
 
     pipeline = StableDiffusionControlNetPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -118,6 +125,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
         )
 
     image_logs = []
+    inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
 
     for validation_prompt, validation_image in zip(validation_prompts, validation_images):
         validation_image = Image.open(validation_image).convert("RGB")
@@ -125,7 +133,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
         images = []
 
         for _ in range(args.num_validation_images):
-            with torch.autocast("cuda"):
+            with inference_ctx:
                 image = pipeline(
                     validation_prompt, validation_image, num_inference_steps=20, generator=generator
                 ).images[0]
@@ -136,6 +144,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
             {"validation_image": validation_image, "images": images, "validation_prompt": validation_prompt}
         )
 
+    tracker_key = "test" if is_final_validation else "validation"
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
             for log in image_logs:
@@ -143,9 +152,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
                 validation_prompt = log["validation_prompt"]
                 validation_image = log["validation_image"]
 
-                formatted_images = []
-
-                formatted_images.append(np.asarray(validation_image))
+                formatted_images = [np.asarray(validation_image)]
 
                 for image in images:
                     formatted_images.append(np.asarray(image))
@@ -167,11 +174,15 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
                     image = wandb.Image(image, caption=validation_prompt)
                     formatted_images.append(image)
 
-            tracker.log({"validation": formatted_images})
+            tracker.log({tracker_key: formatted_images})
         else:
-            logger.warn(f"image logging not implemented for {tracker.name}")
+            logger.warning(f"image logging not implemented for {tracker.name}")
 
-        return image_logs
+    del pipeline
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    return image_logs
 
 
 def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: str, revision: str):
@@ -197,7 +208,7 @@ def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: st
 def save_model_card(repo_id: str, image_logs=None, base_model=str, repo_folder=None):
     img_str = ""
     if image_logs is not None:
-        img_str = "You can find some example images below.\n"
+        img_str = "You can find some example images below.\n\n"
         for i, log in enumerate(image_logs):
             images = log["images"]
             validation_prompt = log["validation_prompt"]
@@ -229,6 +240,7 @@ These are controlnet weights trained on {base_model} with new type of conditioni
         "text-to-image",
         "diffusers",
         "controlnet",
+        "diffusers-training",
     ]
     model_card = populate_model_card(model_card, tags=tags)
 
@@ -557,9 +569,6 @@ def parse_args(input_args=None):
     if args.dataset_name is None and args.train_data_dir is None:
         raise ValueError("Specify either `--dataset_name` or `--train_data_dir`")
 
-    if args.dataset_name is not None and args.train_data_dir is not None:
-        raise ValueError("Specify only one of `--dataset_name` or `--train_data_dir`")
-
     if args.proportion_empty_prompts < 0 or args.proportion_empty_prompts > 1:
         raise ValueError("`--proportion_empty_prompts` must be in the range [0, 1].")
 
@@ -601,6 +610,7 @@ def make_train_dataset(args, tokenizer, accelerator):
             args.dataset_name,
             args.dataset_config_name,
             cache_dir=args.cache_dir,
+            data_dir=args.train_data_dir,
         )
     else:
         if args.train_data_dir is not None:
@@ -738,6 +748,10 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
+    # Disable AMP for MPS.
+    if torch.backends.mps.is_available():
+        accelerator.native_amp = False
+
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -847,7 +861,7 @@ def main(args):
 
             xformers_version = version.parse(xformers.__version__)
             if xformers_version == version.parse("0.0.16"):
-                logger.warn(
+                logger.warning(
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
@@ -913,17 +927,22 @@ def main(args):
     )
 
     # Scheduler and math around the number of training steps.
-    overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    # Check the PR https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
+    num_warmup_steps_for_scheduler = args.lr_warmup_steps * accelerator.num_processes
     if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
+        len_train_dataloader_after_sharding = math.ceil(len(train_dataloader) / accelerator.num_processes)
+        num_update_steps_per_epoch = math.ceil(len_train_dataloader_after_sharding / args.gradient_accumulation_steps)
+        num_training_steps_for_scheduler = (
+            args.num_train_epochs * num_update_steps_per_epoch * accelerator.num_processes
+        )
+    else:
+        num_training_steps_for_scheduler = args.max_train_steps * accelerator.num_processes
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_warmup_steps=num_warmup_steps_for_scheduler,
+        num_training_steps=num_training_steps_for_scheduler,
         num_cycles=args.lr_num_cycles,
         power=args.lr_power,
     )
@@ -948,8 +967,14 @@ def main(args):
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if overrode_max_train_steps:
+    if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        if num_training_steps_for_scheduler != args.max_train_steps * accelerator.num_processes:
+            logger.warning(
+                f"The length of the 'train_dataloader' after 'accelerator.prepare' ({len(train_dataloader)}) does not match "
+                f"the expected length ({len_train_dataloader_after_sharding}) when the learning rate scheduler was created. "
+                f"This inconsistency may result in the learning rate scheduler not functioning properly."
+            )
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
@@ -1030,7 +1055,9 @@ def main(args):
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                noisy_latents = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps).to(
+                    dtype=weight_dtype
+                )
 
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
@@ -1125,11 +1152,27 @@ def main(args):
             if global_step >= args.max_train_steps:
                 break
 
-    # Create the pipeline using using the trained modules and save it.
+    # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         controlnet = unwrap_model(controlnet)
         controlnet.save_pretrained(args.output_dir)
+
+        # Run a final round of validation.
+        image_logs = None
+        if args.validation_prompt is not None:
+            image_logs = log_validation(
+                vae=vae,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                unet=unet,
+                controlnet=None,
+                args=args,
+                accelerator=accelerator,
+                weight_dtype=weight_dtype,
+                step=global_step,
+                is_final_validation=True,
+            )
 
         if args.push_to_hub:
             save_model_card(
