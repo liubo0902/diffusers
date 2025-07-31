@@ -75,7 +75,7 @@ class FluxSingleTransformerBlock(nn.Module):
             eps=1e-6,
             pre_only=True,
         )
-
+    @torch.compile()
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -132,7 +132,7 @@ class FluxTransformerBlock(nn.Module):
 
         self.norm2_context = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff_context = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
-
+    @torch.compile()
     def forward(
         self,
         hidden_states: torch.Tensor,
