@@ -1,4 +1,4 @@
-<!--Copyright 2024 The HuggingFace Team. All rights reserved.
+<!--Copyright 2025 The HuggingFace Team. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
 the License. You may obtain a copy of the License at
@@ -38,24 +38,10 @@ pip install .
 
 Navigate to the example folder with the training script and install the required dependencies for the script you're using:
 
-<hfoptions id="installation">
-<hfoption id="PyTorch">
-
 ```bash
 cd examples/text_to_image
 pip install -r requirements.txt
 ```
-
-</hfoption>
-<hfoption id="Flax">
-
-```bash
-cd examples/text_to_image
-pip install -r requirements_flax.txt
-```
-
-</hfoption>
-</hfoptions>
 
 <Tip>
 

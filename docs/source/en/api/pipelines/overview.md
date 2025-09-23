@@ -1,4 +1,4 @@
-<!--Copyright 2024 The HuggingFace Team. All rights reserved.
+<!--Copyright 2025 The HuggingFace Team. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
 the License. You may obtain a copy of the License at
@@ -37,6 +37,7 @@ The table below lists all the pipelines currently available in 🤗 Diffusers an
 | [AudioLDM2](audioldm2) | text2audio |
 | [AuraFlow](auraflow) | text2image |
 | [BLIP Diffusion](blip_diffusion) | text2image |
+| [Bria 3.2](bria_3_2) | text2image |
 | [CogVideoX](cogvideox) | text2video |
 | [Consistency Models](consistency_models) | unconditional image generation |
 | [ControlNet](controlnet) | text2image, image2image, inpainting |
@@ -105,10 +106,20 @@ The table below lists all the pipelines currently available in 🤗 Diffusers an
 
 [[autodoc]] pipelines.StableDiffusionMixin.disable_freeu
 
-## FlaxDiffusionPipeline
-
-[[autodoc]] pipelines.pipeline_flax_utils.FlaxDiffusionPipeline
-
 ## PushToHubMixin
 
 [[autodoc]] utils.PushToHubMixin
+
+## Callbacks
+
+[[autodoc]] callbacks.PipelineCallback
+
+[[autodoc]] callbacks.SDCFGCutoffCallback
+
+[[autodoc]] callbacks.SDXLCFGCutoffCallback
+
+[[autodoc]] callbacks.SDXLControlnetCFGCutoffCallback
+
+[[autodoc]] callbacks.IPAdapterScaleCutoffCallback
+
+[[autodoc]] callbacks.SD3CFGCutoffCallback

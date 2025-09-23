@@ -20,8 +20,8 @@ from PIL import Image
 from transformers import AutoTokenizer, T5EncoderModel
 
 from diffusers import AutoencoderKLWan, FlowMatchEulerDiscreteScheduler, WanVACEPipeline, WanVACETransformer3DModel
-from diffusers.utils.testing_utils import enable_full_determinism
 
+from ...testing_utils import enable_full_determinism
 from ..pipeline_params import TEXT_TO_IMAGE_BATCH_PARAMS, TEXT_TO_IMAGE_IMAGE_PARAMS, TEXT_TO_IMAGE_PARAMS
 from ..test_pipelines_common import PipelineTesterMixin
 
@@ -87,6 +87,7 @@ class WanVACEPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
             "scheduler": scheduler,
             "text_encoder": text_encoder,
             "tokenizer": tokenizer,
+            "transformer_2": None,
         }
         return components
 
@@ -199,3 +200,15 @@ class WanVACEPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
     @unittest.skip("Batching is not yet supported with this pipeline")
     def test_inference_batch_single_identical(self):
         return super().test_inference_batch_single_identical()
+
+    @unittest.skip(
+        "AutoencoderKLWan encoded latents are always in FP32. This test is not designed to handle mixed dtype inputs"
+    )
+    def test_float16_inference(self):
+        pass
+
+    @unittest.skip(
+        "AutoencoderKLWan encoded latents are always in FP32. This test is not designed to handle mixed dtype inputs"
+    )
+    def test_save_load_float16(self):
+        pass
