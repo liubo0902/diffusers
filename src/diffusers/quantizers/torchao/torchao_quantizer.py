@@ -33,6 +33,7 @@ from ...utils import (
     logging,
 )
 from ..base import DiffusersQuantizer
+logger = logging.get_logger(__name__)
 
 
 if TYPE_CHECKING:
@@ -82,11 +83,17 @@ def _update_torch_safe_globals():
     ]
     try:
         from torchao.dtypes import NF4Tensor
-        from torchao.dtypes.floatx.float8_layout import Float8AQTTensorImpl
-        from torchao.dtypes.uintx.uint4_layout import UInt4Tensor
         from torchao.dtypes.uintx.uintx_layout import UintxAQTTensorImpl, UintxTensor
 
-        safe_globals.extend([UintxTensor, UInt4Tensor, UintxAQTTensorImpl, Float8AQTTensorImpl, NF4Tensor])
+        safe_globals.extend([UintxTensor, UintxAQTTensorImpl, NF4Tensor])
+
+        if is_torchao_version(">", "0.15.0"):
+            pass
+        else:
+            from torchao.dtypes.floatx.float8_layout import Float8AQTTensorImpl
+            from torchao.dtypes.uintx.uint4_layout import UInt4Tensor
+
+            safe_globals.extend([UInt4Tensor, Float8AQTTensorImpl])
 
     except (ImportError, ModuleNotFoundError) as e:
         logger.warning(
@@ -105,9 +112,6 @@ if (
     and is_torchao_version(">=", "0.7.0")
 ):
     _update_torch_safe_globals()
-
-
-logger = logging.get_logger(__name__)
 
 
 def _quantization_type(weight):
